@@ -1,7 +1,9 @@
-name: Node tests
+name: Console bot checks
+
 on:
   push:
   pull_request:
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -10,11 +12,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: JavaScript syntax checks
-        run: |
-          node --check src/core.js
-          node --check src/content.js
-          node --check src/background.js
-          node --check src/popup.js
-      - name: Mock browser and core tests
+      - name: Check JavaScript syntax
+        run: node --check console.js
+      - name: Verify simulated Entry Story interactions
         run: node --test tests/*.test.js
