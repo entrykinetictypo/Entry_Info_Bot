@@ -1,19 +1,33 @@
 {
   "manifest_version": 3,
   "name": "Entry Info Bot",
-  "version": "0.1.0",
-  "description": "엔트리 이야기에서 !'닉네임'정보 명령어를 감지하고 계정 통계를 조회하는 비공식 봇",
-  "permissions": ["storage", "activeTab"],
-  "host_permissions": ["https://playentry.org/*"],
+  "version": "0.2.0",
+  "description": "다른 사람이 엔트리 이야기에 !'닉네임'정보를 게시하면 해당 글에 댓글로 정보를 자동 답변하는 봇",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://playentry.org/*"
+  ],
   "action": {
     "default_title": "Entry Info Bot",
     "default_popup": "popup.html"
   },
   "content_scripts": [
     {
-      "matches": ["https://playentry.org/community/entrystory/*"],
-      "js": ["src/core.js", "src/content.js"],
+      "matches": [
+        "https://playentry.org/community/entrystory/*"
+      ],
+      "js": [
+        "src/core.js",
+        "src/content.js"
+      ],
       "run_at": "document_idle"
     }
-  ]
+  ],
+  "background": {
+    "service_worker": "src/background.js"
+  }
 }

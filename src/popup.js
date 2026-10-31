@@ -7,7 +7,6 @@
     lastPoll: "entryInfoBotLastPoll"
   };
   var enabled = document.getElementById("botEnabled");
-  var autoReply = document.getElementById("autoReply");
   var status = document.getElementById("status");
   var result = document.getElementById("testResult");
   var nickname = document.getElementById("nickname");
@@ -38,11 +37,9 @@
       [keys.logs]: [],
       [keys.lastPoll]: 0
     });
-    enabled.checked = Boolean(data[keys.enabled]);
-    autoReply.checked = Boolean(data[keys.autoReply]);
-    var text = !enabled.checked ? "⏸ 정지 중" :
-      autoReply.checked ? "🟢 감지 중 · 자동 댓글 허용" :
-      "🔎 감지 중 · 미리보기 모드";
+    enabled.checked = Boolean(data[keys.enabled] && data[keys.autoReply]);
+    var text = enabled.checked ? "🟢 새 명령어 감지 · 원본 글에 댓글 자동 작성" :
+      "⏸ 자동 댓글 중지";
     if (enabled.checked && data[keys.lastPoll]) {
       text += " · 마지막 확인 " + new Date(data[keys.lastPoll]).toLocaleTimeString("ko-KR");
     }
@@ -50,21 +47,24 @@
     renderLogs(data[keys.logs]);
   }
 
-  enabled.addEventListener("change", function () {
-    chrome.storage.local.set({ [keys.enabled]: enabled.checked }).then(renderState);
-  });
-  autoReply.addEventListener("change", async function () {
-    if (autoReply.checked) {
+  enabled.addEventListener("change", async function () {
+    var start = enabled.checked;
+    if (start) {
       var ok = confirm(
-        "자동 댓글을 켜면 명령어가 포함된 새 게시글에 실제 댓글을 시도합니다.\n" +
-        "엔트리 운영 정책을 확인했고, 자동 게시 기능을 사용하겠습니까?"
+        "봇이 다른 사람의 엔트리 이야기 글에서 !'닉네임'정보 명령어를 감지해\n" +
+        "봇 계정으로 그 게시글에 자동 댓글을 작성합니다.\n" +
+        "엔트리 운영 정책을 확인했고 자동 댓글을 허용하겠습니까?"
       );
       if (!ok) {
-        autoReply.checked = false;
+        enabled.checked = false;
         return;
       }
     }
-    await chrome.storage.local.set({ [keys.autoReply]: autoReply.checked });
+    await chrome.storage.local.set({
+      [keys.enabled]: start,
+      [keys.autoReply]: start,
+      entryInfoBotPending: [] // A stopped bot won't resume old pending comments.
+    });
     renderState();
   });
 

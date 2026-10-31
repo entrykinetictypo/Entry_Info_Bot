@@ -6,14 +6,15 @@
   const C = window.EntryInfoBotCore;
   const URL_BASE = "https://playentry.org/graphql/";
   const LIMIT_PER_HOUR = 10;
-  const POLL_MS = 30000;
   const MAX_PROJECT_PAGES = 25;
   const HISTORY_LIMIT = 200;
+  const MAX_PENDING = 40;
   const SETTINGS = {
     enabled: "entryInfoBotEnabled",
     autoReply: "entryInfoBotAutoReply",
     logs: "entryInfoBotLogs",
     seen: "entryInfoBotSeen",
+    pending: "entryInfoBotPending",
     recentReplies: "entryInfoBotRecentReplies",
     lastPoll: "entryInfoBotLastPoll"
   };
@@ -48,6 +49,18 @@
       } catch (_) {}
     }
     return "";
+  }
+
+  // Prevent replying to the bot's own Story posts.
+  function currentUserId() {
+    const next = document.getElementById("__NEXT_DATA__");
+    try {
+      const data = JSON.parse(next?.textContent || "{}");
+      return data?.props?.pageProps?.initialState?.common?.user?.id ||
+             data?.props?.initialState?.common?.user?.id || "";
+    } catch (_) {
+      return "";
+    }
   }
 
   function requiredHeaders(write) {
@@ -113,6 +126,9 @@
     if (exact) return exact;
     if (directFailed && result.userList == null) throw new Error("사용자 검색 API가 응답하지 않았습니다.");
     if (!result.userList || !Array.isArray(result.userList.list)) throw new Error("검색 결과 형식 오류");
+    if (Number(result.userList.total) > result.userList.list.length) {
+      throw new Error("검색 결과가 많아 정확히 일치하는 닉네임의 존재 여부를 확정할 수 없습니다.");
+    }
     return null;
   }
 
@@ -188,7 +204,6 @@
     if (!s[SETTINGS.enabled] || !s[SETTINGS.autoReply]) return false;
     if ((s[SETTINGS.seen] || []).includes(postId)) return false;
     if (recent.length >= LIMIT_PER_HOUR || (recent.length && now - recent[recent.length - 1] < 60000)) {
-      await addLog("댓글 제한(1분 1회, 시간당 최대 10회)으로 건너뜀");
       return false;
     }
     // Mark before mutation to avoid duplicate replies after a failed/ambiguous network response.
@@ -213,74 +228,135 @@
     return result.comment.id;
   }
 
-  async function processPost(post) {
-    const nickname = C.parseCommand(C.normalizePostText(post.content));
-    if (!nickname) return;
-    const s = await chrome.storage.local.get({ [SETTINGS.seen]: [] });
-    if (s[SETTINGS.seen].includes(post.id)) return;
+  // Queue new requests so rate limits delay replies rather than silently discard them.
+  async function enqueueNewPosts(posts) {
+    const s = await chrome.storage.local.get({
+      [SETTINGS.pending]: [], [SETTINGS.seen]: []
+    });
+    const pending = Array.isArray(s[SETTINGS.pending]) ? s[SETTINGS.pending] : [];
+    const seen = new Set(Array.isArray(s[SETTINGS.seen]) ? s[SETTINGS.seen] : []);
+    const ids = new Set(pending.map(p => p.id));
+    const ownId = currentUserId();
+    let added = 0;
+    for (const post of posts) {
+      const nickname = C.parseCommand(C.normalizePostText(post.content));
+      if (!nickname || !post.id || (ownId && post.user?.id === ownId)) continue;
+      if (seen.has(post.id) || ids.has(post.id)) continue;
+      if (pending.length >= MAX_PENDING) {
+        await addLog("대기열이 가득 차 신규 명령어를 추가하지 못했습니다.");
+        break;
+      }
+      pending.push({ id: post.id, nickname, attempts: 0 });
+      ids.add(post.id);
+      added++;
+    }
+    if (added) {
+      await chrome.storage.local.set({ [SETTINGS.pending]: pending });
+      await addLog("다른 사용자의 명령어 " + added + "건 감지 · 해당 글에 댓글 작성 대기");
+    }
+  }
+
+  async function dropPending(id) {
+    const s = await chrome.storage.local.get({ [SETTINGS.pending]: [] });
+    await chrome.storage.local.set({
+      [SETTINGS.pending]: (s[SETTINGS.pending] || []).filter(p => p.id !== id)
+    });
+  }
+
+  async function drainPending() {
+    const s = await chrome.storage.local.get({
+      [SETTINGS.pending]: [],
+      [SETTINGS.seen]: [],
+      [SETTINGS.recentReplies]: [],
+      [SETTINGS.enabled]: false,
+      [SETTINGS.autoReply]: false
+    });
+    if (!s[SETTINGS.enabled] || !s[SETTINGS.autoReply]) return;
+    const queue = s[SETTINGS.pending] || [];
+    if (!queue.length) return;
+    const post = queue[0];
+    if ((s[SETTINGS.seen] || []).includes(post.id)) {
+      await dropPending(post.id);
+      return;
+    }
+    const recent = (s[SETTINGS.recentReplies] || [])
+      .filter(t => Number.isFinite(t) && Date.now() - t < 3600000);
+    if (recent.length >= LIMIT_PER_HOUR ||
+        (recent.length && Date.now() - recent[recent.length - 1] < 60000)) {
+      return; // Keep the request until the next periodic check.
+    }
 
     let answer;
     try {
-      answer = await getUserInfo(nickname);
+      answer = await getUserInfo(post.nickname);
     } catch (error) {
-      await addLog(nickname + " 조회 실패: " + error.message);
+      await addLog(post.nickname + " 정보 조회 실패: " + error.message);
+      const count = (post.attempts || 0) + 1;
+      const now = await chrome.storage.local.get({ [SETTINGS.pending]: [] });
+      const items = (now[SETTINGS.pending] || []).map(p =>
+        p.id === post.id ? { ...p, attempts: count } : p
+      );
+      if (count >= 3) {
+        await dropPending(post.id);
+        await addLog("3회 조회 실패로 대기열에서 제외: " + post.nickname);
+      } else {
+        await chrome.storage.local.set({ [SETTINGS.pending]: items });
+      }
       return;
     }
-    const config = await chrome.storage.local.get({
-      [SETTINGS.enabled]: false, [SETTINGS.autoReply]: false
-    });
-    if (!config[SETTINGS.enabled]) return;
-    if (!config[SETTINGS.autoReply]) {
-      const seen = (await chrome.storage.local.get({ [SETTINGS.seen]: [] }))[SETTINGS.seen];
-      await chrome.storage.local.set({
-        [SETTINGS.seen]: [...seen, post.id].slice(-HISTORY_LIMIT)
-      });
-      await addLog("미리보기 " + nickname + ": " + answer.replace(/\n/g, " | "));
-      return;
-    }
+
     if (!(await canReply(post.id))) return;
     try {
+      // 'post.id' is the original user's Entry Story post.
       await sendComment(post.id, answer);
-      await addLog("댓글 작성 성공: " + nickname + " (" + post.id + ")");
+      await addLog("다른 사용자 게시글에 댓글 작성 성공: " + post.nickname);
     } catch (error) {
       await addLog("댓글 작성 실패/확인 불가: " + error.message);
       console.warn("[Entry Info Bot] Comment submission failed:", error.message);
+    } finally {
+      await dropPending(post.id);
     }
   }
 
   async function checkStories() {
-    if (busy || !onStoryList() || document.visibilityState !== "visible" || !document.hasFocus()) return;
+    // An alarm can deliver a tick to a background tab even if it is not focused.
+    if (busy || !onStoryList()) return;
     busy = true;
     try {
-      const s = await chrome.storage.local.get({ [SETTINGS.enabled]: false });
-      if (!s[SETTINGS.enabled]) {
+      const s = await chrome.storage.local.get({
+        [SETTINGS.enabled]: false, [SETTINGS.autoReply]: false
+      });
+      if (!s[SETTINGS.enabled] || !s[SETTINGS.autoReply]) {
         initialized = false;
         newestId = null;
         return;
       }
       const list = await latestStories();
       await chrome.storage.local.set({ [SETTINGS.lastPoll]: Date.now() });
-      if (!list.length) return;
-      if (!initialized) {
-        newestId = list[0].id;
-        initialized = true;
-        await addLog("감지 시작: 기존 게시글은 무시합니다.");
-        return;
+      if (list.length) {
+        if (!initialized) {
+          newestId = list[0].id;
+          initialized = true;
+          await addLog("자동 댓글 감지 시작: 이전 게시글은 무시하고 이후 글부터 답합니다.");
+        } else {
+          const newPosts = [];
+          let foundLast = false;
+          for (const post of list) {
+            if (post.id === newestId) {
+              foundLast = true;
+              break;
+            }
+            newPosts.push(post);
+          }
+          newestId = list[0].id;
+          if (!foundLast && newPosts.length >= 20) {
+            await addLog("새 글이 20건 이상 누적되어 누락 가능성이 있어 이번 목록은 건너뜁니다.");
+          } else {
+            await enqueueNewPosts(newPosts.reverse());
+          }
+        }
       }
-      const posts = [];
-      for (const post of list) {
-        if (post.id === newestId) break;
-        posts.push(post);
-      }
-      if (posts.length === list.length && newestId !== list[0].id) {
-        newestId = list[0].id;
-        await addLog("새 글이 20건 이상 누적되어 누락 가능성이 있어 이번 조회는 건너뜁니다.");
-        return;
-      }
-      newestId = list[0].id;
-      for (const post of posts.reverse()) {
-        await processPost(post);
-      }
+      await drainPending();
     } catch (error) {
       await addLog("감시 오류: " + error.message);
     } finally {
@@ -289,6 +365,10 @@
   }
 
   chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
+    if (message?.type === "entryInfoBotTick") {
+      checkStories();
+      return false;
+    }
     if (!message || message.type !== "entryInfoBotLookup") return false;
     const nickname = String(message.nickname || "").trim();
     if (!onStoryList() || !nickname || nickname.length > 40) {
@@ -311,6 +391,6 @@
     }
   });
 
-  setInterval(checkStories, POLL_MS);
+  // Alarms from the extension service worker also run when this tab is unfocused.
   checkStories();
 })();
