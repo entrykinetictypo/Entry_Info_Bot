@@ -199,11 +199,11 @@ test("nonexistent exact nickname replies with the requested message", async () =
   f.bot.stop();
 });
 
-test("bot responds to its own new command post, but ignores malformed commands", async () => {
+test("bot responds to its own valid command, but ignores unrelated commands", async () => {
   const f = fixture();
   await f.bot.start();
   f.setPosts([
-    post("wrong", "!12옴정보"),
+    post("wrong", "!12옴"),
     post("mine", "!'12옴'정보", "bot-id", "ty_pe"),
     post("old", "기존 글")
   ]);
@@ -604,4 +604,120 @@ test("manual batch never silently duplicates a pending or attempted reply", asyn
   assert.equal(f.comments.length, 1);
   assert.equal(f.bot.status().queued, 1);
   f.bot.stop();
+});
+
+
+test("exception handling classifies unquoted and malformed nickname commands", () => {
+  const f = fixture();
+  assert.equal(f.bot.parse("!김곤충 정보"), null);
+  for (const source of ["!김곤충 정보", "!김곤충정보", "<p>!김곤충&nbsp;정보</p>",
+    "!“김곤충”정보", "!\"김곤충\"정보", "!'김곤충 정보", "!김곤충'정보"]) {
+    const result = f.bot.classify(source);
+    assert.equal(result?.kind, "format-error", source);
+    assert.equal(result.nickname, "김곤충", source);
+  }
+  for (const source of ["!'김곤충'정보", "!'김곤충' 정보", "!‘김곤충’ 정보"]) {
+    const result = f.bot.classify(source);
+    assert.equal(result?.kind, "info", source);
+    assert.equal(result.nickname, "김곤충");
+  }
+  for (const text of ["!도움말", "나는 김곤충 정보가 궁금하다", "!김곤충 정보 더 알려줘",
+    "!어떤 명령어인가요?\n정보", "!" + "김".repeat(95) + " 정보"]) {
+    assert.equal(f.bot.classify(text), null, text);
+  }
+});
+
+test("malformed '김곤충 정보' command gets helpful comment without any profile API call", async () => {
+  const f = fixture({ userSearchHttp400: true });
+  await f.bot.start();
+  f.setPosts([
+    post("missing-quotes", "!김곤충 정보", "different-author", "테스터"),
+    post("old", "이미 있던 글")
+  ]);
+  await f.bot.tick();
+  assert.equal(f.comments.length, 1);
+  assert.equal(f.comments[0].target, "missing-quotes");
+  assert.match(f.comments[0].content, /명령어 형식 오류/);
+  assert.match(f.comments[0].content, /작은따옴표/);
+  assert.match(f.comments[0].content, /!'김곤충'정보/);
+  assert.equal(f.fetchCalls.filter(x => [
+    "SELECT_USER_BY_NICKNAME", "SELECT_USER_LIST", "FIND_USERSTATUS_BY_USERNAME",
+    "SELECT_USER_PROJECTS"
+  ].includes(x.operation)).length, 0);
+  await f.bot.tick();
+  assert.equal(f.comments.length, 1);
+  f.bot.stop();
+});
+
+test("all matching malformed posts each receive one guidance reply with normal rate limits", async () => {
+  const f = fixture({
+    nickname: "김곤충",
+    posts: [
+      post("without-quotes", "!김곤충 정보", "user-a", "첫번째"),
+      post("wrong-quotes", '!"김곤충"정보', "user-b", "두번째"),
+      post("valid", "!'김곤충' 정보", "user-c", "세번째"),
+      post("unrelated", "!도움말", "user-d", "네번째")
+    ]
+  });
+  const batch = await f.bot.replyToAllRecentCommands();
+  assert.equal(batch.matched, 3);
+  assert.equal(batch.addedToQueue, 3);
+  assert.equal(f.comments.length, 1);
+  assert.equal(f.bot.status().queued, 2);
+  f.advanceTime(61000);
+  await f.bot.tick();
+  assert.equal(f.comments.length, 2);
+  f.advanceTime(61000);
+  await f.bot.tick();
+  assert.equal(f.comments.length, 3);
+  assert.deepEqual([...f.comments.map(x => x.target)].sort(), [
+    "valid", "without-quotes", "wrong-quotes"
+  ].sort());
+  assert.equal(f.comments.filter(x => x.content.includes("명령어 형식 오류")).length, 2);
+  assert.equal(f.comments.filter(x => x.content.includes("작품 수:")).length, 1);
+  assert.equal(f.bot.status().queued, 0);
+  const again = await f.bot.replyToAllRecentCommands();
+  assert.equal(again.addedToQueue, 0);
+  assert.equal(again.alreadyHandled, 3);
+  assert.equal(f.comments.length, 3);
+  f.bot.stop();
+});
+
+test("manual nickname filter includes both valid and missing-quote requests", async () => {
+  const f = fixture({
+    nickname: "김곤충",
+    posts: [
+      post("bad", "!김곤충 정보", "someone", "아무개"),
+      post("good", "!'김곤충'정보", "someone-else", "다른 사람"),
+      post("another", "!12옴 정보", "someone-third", "세번째")
+    ]
+  });
+  const result = await f.bot.replyToRecentCommand("김곤충");
+  assert.equal(result.matched, 2);
+  assert.equal(result.addedToQueue, 2);
+  assert.equal(f.comments.length, 1);
+  f.advanceTime(61000);
+  await f.bot.tick();
+  assert.equal(f.comments.length, 2);
+  assert.equal(f.comments.some(c => c.target === "another"), false);
+  f.bot.stop();
+});
+
+test("preview mode shows malformed command guidance without posting a comment", async () => {
+  const f = fixture();
+  await f.bot.preview();
+  f.setPosts([post("preview-error", "!김곤충 정보"), post("old", "이미 있던 글")]);
+  await f.bot.tick();
+  assert.equal(f.comments.length, 0);
+  assert.ok(f.bot.status().recentLogs.some(l => l.includes("작은따옴표")));
+  f.bot.stop();
+});
+
+test("inspectRecent labels malformed nickname command as format error", async () => {
+  const f = fixture({ posts: [post("format-error", "!김곤충 정보")] });
+  const rows = await f.bot.inspectRecent();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].classification, "형식 오류 → 사용법 안내");
+  assert.equal(rows[0].recognizedNickname, "김곤충");
+  assert.equal(f.comments.length, 0);
 });
