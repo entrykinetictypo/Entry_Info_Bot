@@ -204,10 +204,40 @@
 
   function commandNickname(raw) {
     const command = plainText(raw);
-    // Accept optional spacing before/after the nickname's quotes.
-    // Example: !'요니작가_온작' 정보 and !'요니작가_온작'정보.
+    // Previous valid commands keep working, including optional whitespace.
     const match = /^![ \t]*['‘’]([^'‘’\r\n]{1,40})['‘’][ \t\u00a0\u3000]*정보$/u.exec(command);
     return match && match[1].trim() ? match[1] : null;
+  }
+
+  function classifyCommand(raw) {
+    const text = plainText(raw);
+    const validNickname = commandNickname(text);
+    if (validNickname) return { kind: "info", nickname: validNickname };
+
+    // Only consider very short, command-looking posts ending in '정보'.
+    // Avoid replying to unrelated discussion, commands or long free-form text.
+    if (text.length > 90 || /[\r\n]/u.test(text)) return null;
+    const invalid = /^![ \t]*([\s\S]{0,46}?)[ \t\u00a0\u3000]*정보$/u.exec(text);
+    if (!invalid) return null;
+
+    let candidate = invalid[1].trim();
+    // Handle missing, mismatched or incorrect quote styles:
+    // !김곤충 정보, !김곤충정보, !"김곤충"정보, !'김곤충 정보.
+    candidate = candidate.replace(/^['‘’"“”]/u, "")
+      .replace(/['‘’"“”]$/u, "").trim();
+    if (candidate.length > 40 || /['‘’"“”!\r\n]/u.test(candidate)) candidate = "";
+    return { kind: "format-error", nickname: candidate };
+  }
+
+  function formatErrorMessage(nickname) {
+    const candidate = typeof nickname === "string" && nickname.trim() &&
+      nickname.length <= 40 && !/['‘’"“”!\r\n]/u.test(nickname)
+      ? nickname : "닉네임";
+    return [
+      "⚠️ 명령어 형식 오류",
+      "닉네임 양쪽에 작은따옴표(')를 넣어 주세요.",
+      "권장 형식(공백 없이): !'" + candidate + "'정보"
+    ].join("\n");
   }
 
   function useLocalDatabase(data) {
@@ -440,8 +470,8 @@
     const seenPosts = new Set();
     let added = 0, alreadyHandled = 0, overflow = 0;
     for (const post of newPosts) {
-      const nickname = commandNickname(post.content);
-      if (!post?.id || !post.user?.id || !nickname || seenPosts.has(post.id)) continue;
+      const request = classifyCommand(post.content);
+      if (!post?.id || !post.user?.id || !request || seenPosts.has(post.id)) continue;
       seenPosts.add(post.id);
       if (state.replied.has(post.id) || inQueue.has(post.id)) {
         alreadyHandled++;
@@ -452,13 +482,17 @@
         continue;
       }
       state.queue.push({
-        id: post.id, nickname,
+        id: post.id,
+        kind: request.kind,
+        nickname: request.nickname,
         author: { id: post.user.id, nickname: post.user.nickname },
         tries: 0
       });
       inQueue.add(post.id);
       added++;
-      log(post.user.nickname + "님의 게시글에서 " + nickname + " 정보 요청 감지");
+      log(post.user.nickname + "님의 게시글에서 " +
+        (request.kind === "format-error" ? "명령어 형식 오류" : request.nickname + " 정보 요청") +
+        " 감지");
     }
     if (added) saveQueue();
     if (overflow) log("대기열 최대 " + CONFIG.maxPending +
@@ -502,7 +536,9 @@
 
     let reply;
     try {
-      reply = await getUserInfo(item.nickname, item.author);
+      reply = item.kind === "format-error"
+        ? formatErrorMessage(item.nickname)
+        : await getUserInfo(item.nickname, item.author);
     } catch (error) {
       log(item.nickname + " 정보 조회 실패: " + error.message);
       item.tries += 1;
@@ -609,12 +645,14 @@
       return text.startsWith("!") || text.includes("정보");
     }).map(post => {
       const text = plainText(post.content);
-      const nickname = commandNickname(post.content);
+      const request = classifyCommand(post.content);
       return {
         postId: post.id,
         author: post.user?.nickname || "(알 수 없음)",
         content: text.slice(0, 150),
-        recognizedNickname: nickname || "(인식 안 됨)",
+        recognizedNickname: request?.nickname || "(인식 안 됨)",
+        classification: request?.kind === "format-error" ? "형식 오류 → 사용법 안내" :
+          request?.kind === "info" ? "정상 명령어" : "해당 없음",
         replyAttempted: state.replied.has(post.id),
         queued: state.queue.some(item => item.id === post.id)
       };
@@ -647,8 +685,8 @@
     try {
       const posts = await collectRecentStories();
       const matches = posts.filter(post => {
-        const requested = commandNickname(post.content);
-        return requested && (nickname === null || requested === nickname) &&
+        const requested = classifyCommand(post.content);
+        return requested && (nickname === null || requested.nickname === nickname) &&
           (authorNickname === null || post.user?.nickname === authorNickname) &&
           (authorId === null || post.user?.id === authorId);
       });
@@ -716,6 +754,7 @@
     status,
     replyToAllRecentCommands: () => replyToRecentCommand(),
     parse: commandNickname,
+    classify: classifyCommand,
     inspectRecent,
     replyToRecentCommand,
     useLocalDatabase,
@@ -733,7 +772,8 @@
       "EntryInfoBot.preview() 미리보기 시작\n" +
       "EntryInfoBot.stop() 정지\n" +
       "EntryInfoBot.status() 상태 확인\n" +
-      "EntryInfoBot.inspectRecent() 최근 게시글 명령어 인식 여부 확인 (댓글 없음)\n" +
+      "EntryInfoBot.inspectRecent() 정상/형식 오류 명령어 검사 (댓글 없음)\n" +
+      "EntryInfoBot.classify('!김곤충 정보') 명령어 예외처리 결과 확인\n" +
       "await EntryInfoBot.replyToRecentCommand('요니작가_온작') 최근 같은 명령어 글 모두 예약\n" +
       "await EntryInfoBot.replyToAllRecentCommands() 최근 명령어 글 전체 예약\n" +
       "EntryInfoBot.loadDatabase() 비공개 ent2-backup/data.json 선택 (오른쪽 위 버튼 클릭)\n" +
