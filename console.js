@@ -16,7 +16,8 @@
     intervalMs: 30000,
     maxRepliesPerHour: 10,
     minReplyIntervalMs: 60000,
-    maxPending: 40,
+    maxPending: 200,
+    maxScanPages: 5, // scan up to 100 recent posts
     maxProjects: 2500,
     projectsPerPage: 100,
     maxPostFetch: 20,
@@ -26,7 +27,8 @@
 
   const KEYS = {
     replied: "entryInfoBotConsoleReplied",
-    attempts: "entryInfoBotConsoleReplyAttempts"
+    attempts: "entryInfoBotConsoleReplyAttempts",
+    pending: "entryInfoBotConsolePending"
   };
   const state = {
     running: false,
@@ -35,7 +37,10 @@
     busy: false,
     newestId: null,
     timer: null,
-    queue: [],
+    queue: readSaved(KEYS.pending).filter(item =>
+      item && typeof item.id === "string" &&
+      typeof item.nickname === "string" && item.nickname.length <= 40
+    ).slice(0, CONFIG.maxPending),
     logs: [],
     generation: 0,
     replied: new Set(readSaved(KEYS.replied)),
@@ -118,8 +123,8 @@
     state.generation += 1;
     if (state.timer !== null) clearInterval(state.timer);
     state.timer = null;
-    state.queue.length = 0;
-    log("정지됨 (" + reason + ")");
+    // Pause, but keep the queue in localStorage for the next launch.
+    log("정지됨 (" + reason + "), 대기 중인 명령어 " + state.queue.length + "건 보관");
   }
 
   async function graphql(name, query, variables, write = false) {
@@ -394,13 +399,15 @@
     ].join("\n");
   }
 
-  async function latestStories() {
+  async function latestStories(start = 0) {
+    const pageParam = { display: CONFIG.maxPostFetch, sort: "created" };
+    if (start > 0) pageParam.start = start;
     const result = await graphql("SELECT_ENTRYSTORY", Q.stories, {
       category: "free",
       term: "all",
       discussType: "entrystory",
       searchType: "scroll",
-      pageParam: { display: CONFIG.maxPostFetch, sort: "created" }
+      pageParam
     });
     if (!Array.isArray(result.discussList?.list)) {
       throw new Error("새 엔트리 이야기 목록을 확인할 수 없어요.");
@@ -408,23 +415,55 @@
     return result.discussList.list;
   }
 
+  async function collectRecentStories(first = null) {
+    const all = [];
+    const ids = new Set();
+    for (let page = 0; page < CONFIG.maxScanPages; page++) {
+      const batch = page === 0 && first ? first :
+        await latestStories(page * CONFIG.maxPostFetch);
+      for (const post of batch) {
+        if (!post?.id || ids.has(post.id)) continue;
+        ids.add(post.id);
+        all.push(post);
+      }
+      if (batch.length < CONFIG.maxPostFetch) break;
+    }
+    return all;
+  }
+
+  function saveQueue() {
+    save(KEYS.pending, state.queue.slice(0, CONFIG.maxPending));
+  }
+
   function enqueue(newPosts) {
-    const inQueue = new Set(state.queue.map(p => p.id));
+    const inQueue = new Set(state.queue.map(item => item.id));
+    const seenPosts = new Set();
+    let added = 0, alreadyHandled = 0, overflow = 0;
     for (const post of newPosts) {
       const nickname = commandNickname(post.content);
-      // Own posts are valid too: the bot answers them as a comment, not a new post.
-      if (!post.id || !post.user?.id || !nickname ||
-          state.replied.has(post.id) || inQueue.has(post.id)) continue;
-      if (state.queue.length >= CONFIG.maxPending) {
-        log("댓글 대기열이 가득 차서 일부 명령어는 받지 않았어요.");
-        return;
+      if (!post?.id || !post.user?.id || !nickname || seenPosts.has(post.id)) continue;
+      seenPosts.add(post.id);
+      if (state.replied.has(post.id) || inQueue.has(post.id)) {
+        alreadyHandled++;
+        continue;
       }
-      state.queue.push({ id: post.id, nickname, author: {
-        id: post.user.id, nickname: post.user.nickname
-      }, tries: 0 });
+      if (state.queue.length >= CONFIG.maxPending) {
+        overflow++;
+        continue;
+      }
+      state.queue.push({
+        id: post.id, nickname,
+        author: { id: post.user.id, nickname: post.user.nickname },
+        tries: 0
+      });
       inQueue.add(post.id);
+      added++;
       log(post.user.nickname + "님의 게시글에서 " + nickname + " 정보 요청 감지");
     }
+    if (added) saveQueue();
+    if (overflow) log("대기열 최대 " + CONFIG.maxPending +
+      "건 초과: " + overflow + "건은 접수하지 못했어요.");
+    return { added, alreadyHandled, overflow };
   }
 
   function markReplyAttempt(postId) {
@@ -469,6 +508,7 @@
       item.tries += 1;
       if (item.tries >= CONFIG.maxRetries || !state.running) {
         state.queue.shift();
+        saveQueue();
         log("조회 실패로 해당 명령어를 건너뛰었어요.");
       }
       return;
@@ -476,8 +516,8 @@
     if (!state.running || state.queue[0] !== item) return;
 
     if (state.preview) {
-      state.replied.add(item.id);
       state.queue.shift();
+      saveQueue();
       log("[미리보기] 게시글 " + item.id + " → " + reply.replace(/\n/g, " | "));
       return;
     }
@@ -485,6 +525,7 @@
     // Mark before the network request: unknown HTTP outcomes must not cause duplicate comments.
     markReplyAttempt(item.id);
     state.queue.shift();
+    saveQueue();
     try {
       await sendComment(item.id, reply);
       log("✅ 원본 게시글 " + item.id + "에 댓글 작성 완료");
@@ -499,20 +540,26 @@
     state.busy = true;
     try {
       checkPage();
-      const posts = await latestStories();
+      let posts = await latestStories();
       if (!state.running) return;
       state.lastCheckedAt = Date.now();
       if (posts.length) {
-        const index = state.newestId
-          ? posts.findIndex(post => post.id === state.newestId) : -1;
-        const latest = posts[0].id;
-        const unseen = index >= 0 ? posts.slice(0, index) : posts;
-        state.newestId = latest;
-        if (index === -1 && unseen.length >= CONFIG.maxPostFetch) {
-          log("게시글이 너무 빨리 쌓여 일부 글을 놓쳤을 수 있어 이번 목록은 건너뛰었어요.");
-        } else {
-          enqueue(unseen.reverse());
+        const previous = state.newestId;
+        const newest = posts[0].id;
+        if (previous && posts.length >= CONFIG.maxPostFetch &&
+            !posts.some(post => post.id === previous)) {
+          posts = await collectRecentStories(posts);
         }
+        if (!state.running) return;
+        const checkpointIndex = previous ?
+          posts.findIndex(post => post.id === previous) : -1;
+        const unseen = checkpointIndex >= 0 ? posts.slice(0, checkpointIndex) : posts;
+        state.newestId = newest;
+        if (previous && checkpointIndex === -1) {
+          log("이전 확인 글을 찾지 못했어요. 최근 최대 " +
+            (CONFIG.maxPostFetch * CONFIG.maxScanPages) + "개 글의 명령어를 복구합니다.");
+        }
+        if (previous) enqueue(unseen.reverse());
       }
       await processQueue();
     } catch (error) {
@@ -541,7 +588,7 @@
       state.preview = options.preview === true;
       state.running = true;
       state.newestId = existing[0]?.id || null;
-      state.queue.length = 0;
+      // Preserve queued requests recovered from localStorage.
       state.timer = setInterval(() => { tick(); }, CONFIG.intervalMs);
       log(state.preview
         ? "👀 미리보기 모드 시작 (댓글을 게시하지 않아요)"
@@ -556,7 +603,7 @@
   // Read-only diagnostics: show how the bot parses recent command-looking posts.
   async function inspectRecent() {
     checkPage();
-    const posts = await latestStories();
+    const posts = await collectRecentStories();
     const rows = posts.filter(post => {
       const text = plainText(post.content);
       return text.startsWith("!") || text.includes("정보");
@@ -573,106 +620,70 @@
       };
     });
     console.table(rows);
-    if (!rows.length) log("최근 20개 게시글에서 정보 명령어 후보를 찾지 못했어요.");
+    if (!rows.length) log("최근 " + CONFIG.maxPostFetch * CONFIG.maxScanPages +
+      "개 게시글에서 정보 명령어 후보를 찾지 못했어요.");
     return rows;
   }
 
-  // Explicitly handle a command already posted by someone else or oneself.
-  // Never bulk-reply: require an exact nickname and a unique matching recent post.
-  async function replyToRecentCommand(nickname, authorNickname = null) {
+  // Queue ALL matching posts, not just one, and reply to each as rate limits permit.
+  async function replyToRecentCommand(nickname = null, authorNickname = null, authorId = null) {
     checkPage();
-    if (typeof nickname !== "string" || !nickname.trim() || nickname.length > 40) {
-      throw new Error("조회할 닉네임을 입력해 주세요.");
+    if (nickname !== null &&
+        (typeof nickname !== "string" || !nickname.trim() || nickname.length > 40)) {
+      throw new Error("조회할 닉네임(1~40자)을 지정하거나 전체 명령어는 인수 없이 호출하세요.");
     }
     const auth = credentials();
     if (!auth.id || !auth.token || !auth.csrf) {
-      throw new Error("로그인 정보를 확인할 수 없어요.");
+      throw new Error("엔트리 로그인 정보를 확인할 수 없어요.");
     }
-    if (state.busy) throw new Error("이미 다른 명령어를 처리 중이에요. 다시 실행해 주세요.");
+    if (state.busy || state.starting) {
+      throw new Error("다른 명령어를 처리 중이에요. 잠시 후 다시 실행해 주세요.");
+    }
+    if (state.running && state.preview) {
+      throw new Error("미리보기 모드에서는 댓글을 달지 않습니다. 정지하고 자동 댓글 모드로 다시 실행해 주세요.");
+    }
+
     state.busy = true;
     try {
-      const posts = await latestStories();
-      const matches = posts.filter(p => commandNickname(p.content) === nickname &&
-        (authorNickname === null || p.user?.nickname === authorNickname));
+      const posts = await collectRecentStories();
+      const matches = posts.filter(post => {
+        const requested = commandNickname(post.content);
+        return requested && (nickname === null || requested === nickname) &&
+          (authorNickname === null || post.user?.nickname === authorNickname) &&
+          (authorId === null || post.user?.id === authorId);
+      });
       if (!matches.length) {
-        throw new Error("최근 20개 게시글에서 !'" + nickname +
-          "' 정보 명령어를 찾지 못했어요. EntryInfoBot.inspectRecent()로 확인해 주세요.");
+        throw new Error("최근 " + CONFIG.maxPostFetch * CONFIG.maxScanPages +
+          "개 글에서 조건에 맞는 명령어를 찾지 못했어요.");
       }
-      if (matches.length > 1) {
-        throw new Error("일치하는 글이 여러 개예요. 작성자 닉네임을 두 번째 인수로 지정해 주세요.");
-      }
-      const matching = matches[0];
-      if (state.replied.has(matching.id)) {
-        throw new Error("이미 이 게시글에 댓글을 시도했어요. 중복 전송하지 않습니다.");
-      }
-      if (!rateLimitAllows()) {
-        throw new Error("댓글 제한 중이에요. 1분 간격 및 시간당 최대 10회 제한을 확인해 주세요.");
-      }
-      const reply = await getUserInfo(nickname, matching.user);
-      if (state.replied.has(matching.id)) {
-        throw new Error("이미 다른 작업이 이 게시글을 처리했어요.");
-      }
-      state.queue = state.queue.filter(item => item.id !== matching.id);
-      markReplyAttempt(matching.id);
-      try {
-        await sendComment(matching.id, reply);
-      } catch (error) {
-        log("기존 게시글 댓글 실패/확인 불가: " + error.message);
-        throw error;
-      }
-      log("✅ " + (matching.user?.nickname || "사용자") +
-        "님의 기존 게시글 " + matching.id + "에 댓글 작성 완료");
-      return { postId: matching.id, author: matching.user?.nickname || null, reply };
+
+      // Auto-start only after an explicit reply command; it continues draining the queue.
+      if (!state.running) await start();
+      const added = enqueue([...matches].reverse());
+      const attemptsBefore = state.attempts.length;
+      await processQueue();
+      const attemptedNow = state.attempts.length > attemptsBefore ? 1 : 0;
+
+      log("📬 일괄 처리: 일치 " + matches.length + "건 / 신규 예약 " +
+        added.added + "건 / 이미 처리·예약 " + added.alreadyHandled +
+        "건 / 초과 " + added.overflow + "건 / 대기 " + state.queue.length + "건");
+      return {
+        matched: matches.length,
+        addedToQueue: added.added,
+        alreadyHandled: added.alreadyHandled,
+        overflow: added.overflow,
+        attemptedNow,
+        pending: state.queue.length
+      };
     } finally {
       state.busy = false;
     }
   }
 
-  // Explicit one-off test for an ALREADY PUBLISHED command post by this account.
-  // Never responds to somebody else's old post; only scans the most recent 20 posts.
   async function replyToOwnPost(nickname) {
-    checkPage();
-    if (typeof nickname !== "string" || !nickname.trim() || nickname.length > 40) {
-      throw new Error("1~40자의 닉네임을 지정해 주세요. 예: EntryInfoBot.replyToOwnPost('삼류')");
-    }
-    const auth = credentials();
-    if (!auth.id || !auth.token || !auth.csrf) {
-      throw new Error("엔트리 로그인 정보가 없어요. 로그인 후 새로고침해 주세요.");
-    }
-    if (state.busy) throw new Error("다른 게시글을 처리 중이에요. 잠시 후 다시 실행해 주세요.");
-    state.busy = true;
-    try {
-      const posts = await latestStories();
-      const matching = posts.find(p => p?.user?.id === auth.id &&
-        commandNickname(p.content) === nickname);
-      if (!matching) {
-        throw new Error("최근 20개 글에서 내 !'" + nickname +
-          "'정보 게시글을 찾지 못했어요. 이전 글은 자동 답변하지 않습니다.");
-      }
-      if (state.replied.has(matching.id)) {
-        throw new Error("이미 이 게시글에 댓글을 시도했어요. 중복 댓글은 작성하지 않습니다.");
-      }
-      if (!rateLimitAllows()) {
-        throw new Error("댓글 제한 중이에요. 1분 간격/시간당 최대 10회를 지켜 주세요.");
-      }
-
-      const reply = await getUserInfo(nickname, matching.user);
-      if (state.replied.has(matching.id)) {
-        throw new Error("다른 작업이 이미 이 게시글을 처리했어요.");
-      }
-      state.queue = state.queue.filter(item => item.id !== matching.id);
-      markReplyAttempt(matching.id);
-      try {
-        await sendComment(matching.id, reply);
-      } catch (error) {
-        log("기존 내 글 댓글 실패/확인 불가: " + error.message);
-        throw error;
-      }
-      log("✅ 기존 내 게시글 " + matching.id + "에 댓글 작성 완료");
-      return { postId: matching.id, reply };
-    } finally {
-      state.busy = false;
-    }
+    const id = credentials().id;
+    if (!id) throw new Error("엔트리 로그인 정보를 확인할 수 없어요.");
+    return replyToRecentCommand(nickname, null, id);
   }
 
   function status() {
@@ -703,6 +714,7 @@
     preview: () => start({ preview: true }),
     stop,
     status,
+    replyToAllRecentCommands: () => replyToRecentCommand(),
     parse: commandNickname,
     inspectRecent,
     replyToRecentCommand,
@@ -722,9 +734,10 @@
       "EntryInfoBot.stop() 정지\n" +
       "EntryInfoBot.status() 상태 확인\n" +
       "EntryInfoBot.inspectRecent() 최근 게시글 명령어 인식 여부 확인 (댓글 없음)\n" +
-      "await EntryInfoBot.replyToRecentCommand('요니작가_온작') 최근 글 하나에 답글 시도\n" +
+      "await EntryInfoBot.replyToRecentCommand('요니작가_온작') 최근 같은 명령어 글 모두 예약\n" +
+      "await EntryInfoBot.replyToAllRecentCommands() 최근 명령어 글 전체 예약\n" +
       "EntryInfoBot.loadDatabase() 비공개 ent2-backup/data.json 선택 (오른쪽 위 버튼 클릭)\n" +
-      "await EntryInfoBot.replyToOwnPost('삼류') 이미 올린 내 글에 댓글 작성\n" +
+      "await EntryInfoBot.replyToOwnPost('삼류') 이미 올린 내 같은 명령어 글 모두 예약\n" +
       "await EntryInfoBot.test('12옴') 닉네임 조회 테스트"
     )
   };

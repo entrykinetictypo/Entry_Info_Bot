@@ -11,6 +11,12 @@ function fixture(options = {}) {
   const fetchCalls = [];
   const comments = [];
   let interval = null;
+  let lastNickname = options.nickname || "12옴";
+  let virtualNow = Date.now();
+  class MockDate extends Date {
+    constructor(...args) { super(...(args.length ? args : [virtualNow])); }
+    static now() { return virtualNow; }
+  }
   let initialPosts = [
     { id: "old", user: { id: "another", nickname: "작성자" }, content: "이미 있던 글" }
   ];
@@ -23,6 +29,7 @@ function fixture(options = {}) {
   const quiet = { log() {}, table() {}, warn() {}, error() {} };
   const context = {
     console: quiet,
+    Date: MockDate,
     setInterval(fn, ms) {
       assert.equal(ms, 30000);
       interval = fn;
@@ -89,10 +96,14 @@ function fixture(options = {}) {
       }
       let data;
       switch (operation) {
-        case "SELECT_ENTRYSTORY":
-          data = { discussList: { total: posts.length, list: posts } };
+        case "SELECT_ENTRYSTORY": {
+          const start = Number(request.variables?.pageParam?.start) || 0;
+          const display = Number(request.variables?.pageParam?.display) || 20;
+          data = { discussList: { total: posts.length, list: posts.slice(start, start + display) } };
           break;
+        }
         case "SELECT_USER_BY_NICKNAME":
+          lastNickname = request.variables.nickname;
           data = { user: nicknameFound
             ? { id: "profile-id", nickname: request.variables.nickname } : null };
           break;
@@ -107,7 +118,7 @@ function fixture(options = {}) {
           }
           data = { userstatus: {
             id: options.profileId || "profile-id",
-            nickname: nicknameFound ? options.nickname || "12옴" : "unknown",
+            nickname: nicknameFound ? options.nickname || lastNickname : "unknown",
             status: { project: 2, follower: 1234, following: 30 }
           } };
           break;
@@ -136,6 +147,7 @@ function fixture(options = {}) {
   return {
     bot, storage, comments, fetchCalls, context,
     setPosts(values) { posts = values; },
+    advanceTime(ms) { virtualNow += ms; },
     setNicknameFound(value) { nicknameFound = value; },
     setStatusError(value) { statusError = value; },
     setFailStatus(value) { failStatus = value; },
@@ -304,7 +316,7 @@ test("one-off reply works for the user's own pre-existing '삼류' Story even wh
     ]
   });
   const reply = await f.bot.replyToOwnPost("삼류");
-  assert.equal(reply.postId, "mine-old");
+  assert.equal(reply.matched, 1);
   assert.equal(f.comments.length, 1);
   assert.equal(f.comments[0].target, "mine-old");
   assert.match(f.comments[0].content, /삼류님의 정보/);
@@ -315,14 +327,16 @@ test("one-off reply never targets somebody else's old Story", async () => {
   const f = fixture({
     posts: [post("other-old", "!'삼류'정보", "other-id", "다른 사용자")]
   });
-  await assert.rejects(f.bot.replyToOwnPost("삼류"), /내 .* 게시글을 찾지 못했어요/);
+  await assert.rejects(f.bot.replyToOwnPost("삼류"), /조건에 맞는 명령어를 찾지 못했어요/);
   assert.equal(f.comments.length, 0);
 });
 
 test("one-off reply cannot post twice to the same Story", async () => {
   const f = fixture({ nickname: "삼류", posts: [post("mine-old", "!'삼류'정보", "bot-id", "ty_pe")] });
   await f.bot.replyToOwnPost("삼류");
-  await assert.rejects(f.bot.replyToOwnPost("삼류"), /이미 이 게시글에 댓글을 시도/);
+  const second = await f.bot.replyToOwnPost("삼류");
+  assert.equal(second.addedToQueue, 0);
+  assert.equal(second.alreadyHandled, 1);
   assert.equal(f.comments.length, 1);
 });
 
@@ -331,7 +345,7 @@ test("one-off reply can only target the exact nickname command", async () => {
     nickname: "삼류",
     posts: [post("mine-old", "!'다른닉'정보", "bot-id", "ty_pe")]
   });
-  await assert.rejects(f.bot.replyToOwnPost("삼류"), /찾지 못했어요/);
+  await assert.rejects(f.bot.replyToOwnPost("삼류"), /조건에 맞는 명령어를 찾지 못했어요/);
   assert.equal(f.comments.length, 0);
 });
 
@@ -364,7 +378,7 @@ test("local private nickname database handles HTTP 400 user API without leaking 
   assert.equal(db.saved, false);
   assert.equal(f.bot.status().databaseLoaded, true);
   const output = await f.bot.replyToOwnPost("삼류");
-  assert.equal(output.postId, "my-old");
+  assert.equal(output.matched, 1);
   assert.equal(f.comments.length, 1);
   assert.equal(f.comments[0].target, "my-old");
   assert.match(f.comments[0].content, /삼류님의 정보/);
@@ -394,7 +408,8 @@ test("do not retry writes to prevent duplicate comments after API failure", asyn
   const f = fixture({ nickname: "삼류", posts: [post("my-old", "!'삼류'정보", "bot-id", "ty_pe")] });
   await f.bot.replyToOwnPost("삼류");
   assert.equal(f.fetchCalls.filter(c => c.operation === "CREATE_COMMENT").length, 1);
-  await assert.rejects(f.bot.replyToOwnPost("삼류"), /이미 이 게시글에 댓글을 시도/);
+  const repeat = await f.bot.replyToOwnPost("삼류");
+  assert.equal(repeat.alreadyHandled, 1);
   assert.equal(f.fetchCalls.filter(c => c.operation === "CREATE_COMMENT").length, 1);
 });
 
@@ -456,20 +471,128 @@ test("replyToRecentCommand sends one explicit reply to another person's earlier 
     posts: [post("old-command", "!'요니작가_온작' 정보", id, "요니작가_온작")]
   });
   const answer = await f.bot.replyToRecentCommand("요니작가_온작");
-  assert.equal(answer.postId, "old-command");
+  assert.equal(answer.matched, 1);
   assert.equal(f.comments.length, 1);
   assert.equal(f.comments[0].target, "old-command");
-  await assert.rejects(f.bot.replyToRecentCommand("요니작가_온작"), /이미 이 게시글에 댓글을 시도/);
+  const again = await f.bot.replyToRecentCommand("요니작가_온작");
+  assert.equal(again.alreadyHandled, 1);
   assert.equal(f.comments.length, 1);
 });
 
-test("manual reply never posts when multiple matching recent commands are ambiguous", async () => {
+test("manual reply queues EVERY matching post and replies to each separately", async () => {
   const f = fixture({
+    nickname: "요니작가_온작",
     posts: [
       post("a", "!'요니작가_온작' 정보", "userA", "첫번째"),
-      post("b", "!'요니작가_온작'정보", "userB", "두번째")
+      post("b", "!'요니작가_온작'정보", "userB", "두번째"),
+      post("c", "!'요니작가_온작' 정보", "userC", "세번째")
     ]
   });
-  await assert.rejects(f.bot.replyToRecentCommand("요니작가_온작"), /여러 개/);
-  assert.equal(f.comments.length, 0);
+  const result = await f.bot.replyToRecentCommand("요니작가_온작");
+  assert.equal(result.matched, 3);
+  assert.equal(result.addedToQueue, 3);
+  assert.equal(f.comments.length, 1);
+  assert.equal(f.bot.status().queued, 2);
+  f.advanceTime(61000);
+  await f.bot.tick();
+  assert.equal(f.comments.length, 2);
+  f.advanceTime(61000);
+  await f.bot.tick();
+  assert.equal(f.comments.length, 3);
+  assert.deepEqual([...f.comments.map(x=>x.target)].sort(), ["a", "b", "c"]);
+  assert.equal(f.bot.status().queued, 0);
+  const again = await f.bot.replyToRecentCommand("요니작가_온작");
+  assert.equal(again.addedToQueue, 0);
+  assert.equal(f.comments.length, 3);
+  f.bot.stop();
+});
+
+
+test("replyToAllRecentCommands queues every valid command regardless of nickname", async () => {
+  const f = fixture({
+    posts: [
+      post("a", "!'삼류' 정보", "one", "글쓴이1"),
+      post("b", "!'12옴'정보", "two", "글쓴이2"),
+      post("not-command", "일반 글", "three", "글쓴이3")
+    ]
+  });
+  const result = await f.bot.replyToAllRecentCommands();
+  assert.equal(result.matched, 2);
+  assert.equal(result.addedToQueue, 2);
+  assert.equal(f.comments.length, 1);
+  f.advanceTime(61000);
+  await f.bot.tick();
+  assert.equal(f.comments.length, 2);
+  assert.deepEqual([...f.comments.map(x => x.target)].sort(), ["a", "b"]);
+  f.bot.stop();
+});
+
+test("manual backfill scans all available pages up to 100 posts, not just 20", async () => {
+  const posts = Array.from({ length: 49 }, (_, i) =>
+    post("older-" + i, "!'12옴' 정보", "user" + i, "작성자" + i));
+  const f = fixture({ posts });
+  const result = await f.bot.replyToRecentCommand("12옴");
+  assert.equal(result.matched, 49);
+  assert.equal(result.addedToQueue, 49);
+  assert.equal(result.pending, 48);
+  assert.equal(f.comments.length, 1);
+  assert.ok(f.fetchCalls.some(x =>
+    x.operation === "SELECT_ENTRYSTORY" &&
+    x.request.variables?.pageParam?.start === 20));
+  f.bot.stop();
+});
+
+test("auto monitoring catches up with more than 20 new posts across pages", async () => {
+  const f = fixture();
+  await f.bot.start();
+  f.setPosts([...Array.from({ length: 40 }, (_, i) =>
+    post("fresh-" + i, "!'12옴' 정보", "user" + i, "작성자" + i)),
+    post("old", "이미 있던 글")]);
+  await f.bot.tick();
+  assert.equal(f.comments.length, 1);
+  assert.equal(f.bot.status().queued, 39);
+  f.bot.stop();
+});
+
+test("pending queue is restored across a script reload and next tick sends further replies", async () => {
+  const f = fixture({
+    posts: [
+      post("one", "!'12옴'정보"),
+      post("two", "!'12옴'정보"),
+      post("three", "!'12옴'정보")
+    ]
+  });
+  await f.bot.replyToRecentCommand("12옴");
+  assert.equal(f.bot.status().queued, 2);
+  assert.equal(JSON.parse(f.storage.get("entryInfoBotConsolePending")).length, 2);
+  f.bot.stop();
+  const old = f.context.window.EntryInfoBot;
+  const newSource = fs.readFileSync(path.join(__dirname, "../console.js"), "utf8");
+  vm.runInNewContext(newSource, f.context, { filename: "console.js", timeout: 1000 });
+  const resumed = f.context.window.EntryInfoBot;
+  assert.notEqual(old, resumed);
+  assert.equal(resumed.status().queued, 2);
+  await resumed.start();
+  f.advanceTime(61000);
+  await resumed.tick();
+  assert.equal(f.comments.length, 2);
+  assert.equal(resumed.status().queued, 1);
+  resumed.stop();
+});
+
+test("manual batch never silently duplicates a pending or attempted reply", async () => {
+  const f = fixture({
+    posts: [
+      post("one", "!'12옴'정보"),
+      post("two", "!'12옴'정보")
+    ]
+  });
+  await f.bot.replyToRecentCommand("12옴");
+  const again = await f.bot.replyToRecentCommand("12옴");
+  assert.equal(again.matched, 2);
+  assert.equal(again.addedToQueue, 0);
+  assert.equal(again.alreadyHandled, 2);
+  assert.equal(f.comments.length, 1);
+  assert.equal(f.bot.status().queued, 1);
+  f.bot.stop();
 });
