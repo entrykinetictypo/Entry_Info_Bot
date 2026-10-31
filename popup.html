@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Entry Info Bot</title>
+  <link rel="stylesheet" href="popup.css">
+  <script src="src/popup.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <span class="brand">🤖</span>
+      <div>
+        <h1>Entry Info Bot</h1>
+        <p>엔트리 이야기 유저 정보 봇 <span class="version">v0.1.0</span></p>
+      </div>
+    </header>
+
+    <section class="panel">
+      <div class="switch-line">
+        <div>
+          <label for="botEnabled" class="heading">봇 활성화</label>
+          <p>새로 올라오는 명령어 글을 확인합니다.</p>
+        </div>
+        <input type="checkbox" id="botEnabled" aria-label="봇 활성화">
+      </div>
+      <div class="switch-line">
+        <div>
+          <label for="autoReply" class="heading">자동 댓글 허용</label>
+          <p>끄면 댓글 없이 미리보기 로그만 남깁니다.</p>
+        </div>
+        <input type="checkbox" id="autoReply" aria-label="자동 댓글 허용">
+      </div>
+      <p id="status" class="status" role="status">상태를 확인하는 중...</p>
+    </section>
+
+    <section class="panel">
+      <h2>닉네임 조회 테스트</h2>
+      <p>현재 로그인한 엔트리 이야기 탭에서 조회합니다. 댓글은 작성하지 않습니다.</p>
+      <div class="test-row">
+        <input id="nickname" type="text" placeholder="예: 12옴" maxlength="40" autocomplete="off" aria-label="테스트할 닉네임">
+        <button id="testBtn" type="button">조회</button>
+      </div>
+      <pre id="testResult" aria-live="polite">!'12옴'정보</pre>
+    </section>
+
+    <section class="panel">
+      <div class="split">
+        <h2>작동 기록</h2>
+        <button id="clearLog" class="text-button" type="button">기록 지우기</button>
+      </div>
+      <div id="logs" class="log-list">아직 기록이 없습니다.</div>
+    </section>
+    <footer>30초 간격 조회 · 1분에 댓글 최대 1회 · 1시간에 최대 10회<br>비공식 도구입니다. 엔트리 운영 정책을 지켜 주세요.</footer>
+  </main>
+</body>
+</html>
