@@ -387,6 +387,7 @@
     }
     throw new Error(
       "사용자 검색 API로 계정 존재 여부를 확인하지 못했습니다. " +
+      "로컬 데이터가 있으면 EntryInfoBot.loadDatabase()로 불러올 수 있습니다. " +
       errors.slice(-2).join(" / ")
     );
   }
