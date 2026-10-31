@@ -320,7 +320,9 @@ test("one-off reply works for the user's own pre-existing '삼류' Story even wh
   assert.equal(f.comments.length, 1);
   assert.equal(f.comments[0].target, "mine-old");
   assert.match(f.comments[0].content, /삼류님의 정보/);
-  assert.equal(f.bot.status().running, false);
+  // Manual batch processing starts the watcher to drain pending replies.
+  assert.equal(f.bot.status().running, true);
+  f.bot.stop();
 });
 
 test("one-off reply never targets somebody else's old Story", async () => {
@@ -392,9 +394,16 @@ test("HTTP 400 with no local DB shows helpful error instead of claiming nonexist
     userSearchHttp400: true,
     posts: [post("my-old", "!'삼류'정보", "bot-id", "ty_pe")]
   });
-  await assert.rejects(f.bot.replyToOwnPost("삼류"), /EntryInfoBot.loadDatabase\(\)/);
+  // The batch command queues the request and logs a lookup failure; it does not
+  // falsely publish a nonexistent-user reply.
+  const output = await f.bot.replyToOwnPost("삼류");
+  assert.equal(output.matched, 1);
+  assert.equal(output.addedToQueue, 1);
+  assert.equal(output.pending, 1);
   assert.equal(f.comments.length, 0);
+  assert.ok(f.bot.status().recentLogs.some(line => line.includes("EntryInfoBot.loadDatabase()")));
   assert.equal(f.fetchCalls.filter(c => c.operation === "GITHUB_USER_DB").length, 0);
+  f.bot.stop();
 });
 
 test("empty or non-object local database cannot be loaded", async () => {
