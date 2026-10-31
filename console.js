@@ -136,11 +136,15 @@
     };
     if (write) headers["x-token"] = auth.token;
 
-    // PlayEntry's generic GraphQL route also supports unregistered query names.
-    // In particular, /graphql/SELECT_USER_BY_NICKNAME and /graphql/SELECT_USER_LIST
-    // can return HTTP 400 although generic /graphql handles the same user fields.
-    const endpoint = name === "SELECT_ENTRYSTORY"
-      ? "/graphql/SELECT_ENTRYSTORY" : "/graphql";
+    // User search and comment mutations use the generic endpoint.
+    // Known working profile, projects and Story queries use named endpoints
+    // as in ent2-backup, avoiding compatibility issues with generic routing.
+    const namedRoute = [
+      "SELECT_ENTRYSTORY",
+      "FIND_USERSTATUS_BY_USERNAME",
+      "SELECT_USER_PROJECTS"
+    ].includes(name);
+    const endpoint = namedRoute ? "/graphql/" + name : "/graphql";
     const response = await fetch(endpoint, {
       method: "POST",
       credentials: "include",

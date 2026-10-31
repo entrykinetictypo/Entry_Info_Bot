@@ -397,3 +397,13 @@ test("do not retry writes to prevent duplicate comments after API failure", asyn
   await assert.rejects(f.bot.replyToOwnPost("삼류"), /이미 이 게시글에 댓글을 시도/);
   assert.equal(f.fetchCalls.filter(c => c.operation === "CREATE_COMMENT").length, 1);
 });
+
+test("profile and project statistics use ent2-backup compatible named endpoints", async () => {
+  const f = fixture({ nickname: "삼류", posts: [post("my-old", "!'삼류'정보", "bot-id", "ty_pe")] });
+  await f.bot.replyToOwnPost("삼류");
+  const status = f.fetchCalls.find(c => c.operation === "FIND_USERSTATUS_BY_USERNAME");
+  const projects = f.fetchCalls.find(c => c.operation === "SELECT_USER_PROJECTS");
+  assert.equal(status.url, "/graphql/FIND_USERSTATUS_BY_USERNAME");
+  assert.equal(projects.url, "/graphql/SELECT_USER_PROJECTS");
+  assert.equal(f.comments.length, 1);
+});
