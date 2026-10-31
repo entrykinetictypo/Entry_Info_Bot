@@ -44,6 +44,7 @@
     ),
     lastCheckedAt: null
   };
+  let nicknameDatabase = null; // optional private ent2-backup data.json, in memory only
 
   const Q = {
     stories: "query SELECT_ENTRYSTORY($pageParam:PageParam,$category:String,$term:String,$discussType:String,$searchType:String){discussList(pageParam:$pageParam,category:$category,term:$term,discussType:$discussType,searchType:$searchType){total list{id content created user{id nickname}}}}",
@@ -152,9 +153,13 @@
     } catch (_) {
       // Some API failures return non-JSON bodies.
     }
+    const firstError = payload?.errors?.[0];
     const apiError = String(
-      payload?.errors?.[0]?.message || payload?.message || payload?.error || ""
-    ).slice(0, 180);
+      (typeof firstError === "string" ? firstError : firstError?.message) ||
+      firstError?.extensions?.code ||
+      (firstError ? JSON.stringify(firstError) : "") ||
+      payload?.message || payload?.error || ""
+    ).slice(0, 240);
 
     if ([401, 403, 429].includes(response.status)) {
       stop("서버가 요청을 제한하거나 인증을 거부함 (HTTP " + response.status + ")");
@@ -194,91 +199,112 @@
     return match && match[1].trim() ? match[1] : null;
   }
 
-  let nicknameDatabasePromise = null;
-
-  async function ent2NicknameDatabase() {
-    // Fallback: ent2-backup bundles nickname -> user ID mappings in data.json.
-    // The 8MB index is fetched only if the live API lookup fails, and cached in memory.
-    if (!nicknameDatabasePromise) {
-      log("실시간 닉네임 검색 실패 · ent2-backup 사용자 데이터베이스 확인 중...");
-      nicknameDatabasePromise = fetch(
-        "https://raw.githubusercontent.com/entrykinetictypo/ent2-backup/main/data.json",
-        { method: "GET", cache: "force-cache" }
-      ).then(async response => {
-        if (!response.ok) throw new Error("GitHub DB HTTP " + response.status);
-        const data = await response.json();
-        if (!data || typeof data !== "object" || Array.isArray(data)) {
-          throw new Error("GitHub DB 응답 형식 오류");
-        }
-        return data;
-      }).catch(error => {
-        nicknameDatabasePromise = null;
-        throw error;
-      });
+  function useLocalDatabase(data) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw new Error("data.json은 {닉네임: 사용자ID} 형식이어야 해요.");
     }
-    return nicknameDatabasePromise;
+    const keys = Object.keys(data);
+    if (!keys.length) throw new Error("비어 있는 닉네임 DB예요.");
+    // Do not persist private nickname mappings or send them to a third party.
+    nicknameDatabase = data;
+    log("🔐 ent2-backup 개인 DB 준비 완료 (" + keys.length.toLocaleString("ko-KR") +
+      "명). 이 탭의 메모리에서만 사용해요.");
+    return { count: keys.length, saved: false };
+  }
+
+  function loadDatabase() {
+    checkPage();
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json,application/json";
+    input.style.display = "none";
+
+    const button = document.createElement("button");
+    button.textContent = "📂 ent2-backup data.json 선택";
+    Object.assign(button.style, {
+      position: "fixed", top: "10px", right: "10px", zIndex: "2147483647",
+      background: "#0bbf91", color: "#fff", padding: "12px 16px",
+      border: "0", borderRadius: "8px", cursor: "pointer",
+      fontWeight: "bold", fontSize: "14px", boxShadow: "0 4px 15px #0003"
+    });
+
+    document.body.append(input, button);
+    log("화면 오른쪽 위의 'ent2-backup data.json 선택' 버튼을 클릭해 주세요.");
+
+    return new Promise((resolve, reject) => {
+      function clean() {
+        button.remove();
+        input.remove();
+      }
+      button.addEventListener("click", () => input.click());
+      input.addEventListener("change", async () => {
+        const file = input.files?.[0];
+        if (!file) return;
+        try {
+          if (file.size > 30000000) throw new Error("파일이 너무 큽니다(30MB 초과).");
+          const data = JSON.parse(await file.text());
+          const value = useLocalDatabase(data);
+          clean();
+          resolve(value);
+        } catch (error) {
+          clean();
+          log("DB 파일 불러오기 실패: " + error.message);
+          reject(error);
+        }
+      });
+    });
   }
 
   async function lookupUser(nickname) {
-    const errors = [];
-    let verifiedNoUser = false;
+    // Private ent2-backup data.json can be loaded manually from the user's PC.
+    // It is never uploaded or cached by this script.
+    if (nicknameDatabase && Object.prototype.hasOwnProperty.call(nicknameDatabase, nickname)) {
+      const id = nicknameDatabase[nickname];
+      if (typeof id !== "string" || !/^[0-9a-f]{24}$/i.test(id)) {
+        throw new Error("로컬 DB의 ID 형식이 올바르지 않습니다.");
+      }
+      return { id, nickname };
+    }
 
-    // 1. The generic /graphql route (rather than /graphql/SELECT_USER_BY_NICKNAME).
+    let verifiedNoUser = false;
+    const errors = [];
     try {
-      const response = await graphql("SELECT_USER_BY_NICKNAME", Q.byNickname, { nickname });
-      const user = response.user;
+      const result = await graphql("SELECT_USER_BY_NICKNAME", Q.byNickname, { nickname });
+      const user = result.user;
       if (user?.id && user.nickname === nickname) return user;
       if (user === null) verifiedNoUser = true;
     } catch (error) {
-      if (!state.running && /HTTP (401|403|429)/.test(error.message)) throw error;
+      if (/HTTP (401|403|429)/.test(error.message)) throw error;
       errors.push(error.message);
       log("실시간 닉네임 검색 실패: " + error.message);
     }
 
-    // 2. Live partial user list, useful if the exact endpoint is unavailable.
     try {
-      const response = await graphql("SELECT_USER_LIST", Q.users, {
+      const result = await graphql("SELECT_USER_LIST", Q.users, {
         query: nickname,
         pageParam: { display: 30, sort: "created" }
       });
-      const users = response.userList;
+      const users = result.userList;
       if (!users || !Array.isArray(users.list)) {
         throw new Error("유저 목록 응답 형식 오류");
       }
-      const matched = users.list.filter(u => u?.id && u.nickname === nickname);
-      if (matched.length > 1) {
-        throw new Error("동일 닉네임 유저가 여러 명 발견되어 조회를 중단했어요.");
-      }
-      if (matched.length === 1) return matched[0];
+      const exact = users.list.filter(u => u?.id && u.nickname === nickname);
+      if (exact.length === 1) return exact[0];
+      if (exact.length > 1) throw new Error("동일 닉네임을 가진 계정이 여러 개여서 확인할 수 없어요.");
       if (typeof users.total === "number" && users.total <= users.list.length) {
         verifiedNoUser = true;
       }
     } catch (error) {
-      if (!state.running && /HTTP (401|403|429)/.test(error.message)) throw error;
+      if (/HTTP (401|403|429)/.test(error.message)) throw error;
       errors.push(error.message);
       log("유저 목록 검색 실패: " + error.message);
     }
-
-    // 3. Local lookup using the published ent2-backup nickname -> ID snapshot.
-    // Database misses are not sufficient proof of nonexistence (nickname may be new).
-    try {
-      const db = await ent2NicknameDatabase();
-      if (Object.prototype.hasOwnProperty.call(db, nickname)) {
-        const id = db[nickname];
-        if (typeof id === "string" && /^[0-9a-f]{24}$/i.test(id)) {
-          log("ent2-backup에서 유저 ID를 찾았어요: " + nickname);
-          return { id, nickname };
-        }
-        throw new Error("GitHub DB의 유저 ID 형식 오류");
-      }
-    } catch (error) {
-      errors.push("GitHub DB: " + error.message);
-      log("닉네임 DB 확인 실패: " + error.message);
-    }
-
     if (verifiedNoUser) return null;
-    throw new Error("닉네임 존재 여부를 확인하지 못했어요. " +
-      (errors.length ? errors.slice(-2).join(" / ") : "검색 결과가 불완전해요."));
+    throw new Error(
+      "엔트리 닉네임 API가 응답하지 않아요. " +
+      "비공개 ent2-backup/data.json을 PC에서 받아 EntryInfoBot.loadDatabase()로 선택해 주세요. " +
+      errors.slice(-2).join(" / ")
+    );
   }
 
   async function projectCounts(userId, expectedPublicCount) {
@@ -571,6 +597,7 @@
       repliesAttemptedLastHour: recent.length,
       lastCheckedAt: state.lastCheckedAt
         ? new Date(state.lastCheckedAt).toLocaleString("ko-KR") : "아직 없음",
+      databaseLoaded: Boolean(nicknameDatabase),
       recentLogs: state.logs.slice(-5)
     };
     console.table({
@@ -578,7 +605,8 @@
       "모드": result.mode,
       "대기 중": result.queued,
       "최근 1시간 댓글 시도": result.repliesAttemptedLastHour,
-      "최근 조회": result.lastCheckedAt
+      "최근 조회": result.lastCheckedAt,
+      "로컬 DB 준비": result.databaseLoaded
     });
     return result;
   }
@@ -588,6 +616,8 @@
     preview: () => start({ preview: true }),
     stop,
     status,
+    useLocalDatabase,
+    loadDatabase,
     replyToOwnPost,
     test: async nickname => {
       checkPage();
@@ -601,6 +631,7 @@
       "EntryInfoBot.preview() 미리보기 시작\n" +
       "EntryInfoBot.stop() 정지\n" +
       "EntryInfoBot.status() 상태 확인\n" +
+      "EntryInfoBot.loadDatabase() 비공개 ent2-backup/data.json 선택 (오른쪽 위 버튼 클릭)\n" +
       "await EntryInfoBot.replyToOwnPost('삼류') 이미 올린 내 글에 댓글 작성\n" +
       "await EntryInfoBot.test('12옴') 닉네임 조회 테스트"
     )

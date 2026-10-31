@@ -352,32 +352,42 @@ test("user lookup and comment use generic /graphql instead of broken /graphql/SE
   f.bot.stop();
 });
 
-test("HTTP 400 on user endpoints falls back to ent2-backup/data.json and verifies profile", async () => {
-  const realId = "0123456789abcdef01234567";
+test("local private nickname database handles HTTP 400 user API without leaking mappings", async () => {
+  const id = "0123456789abcdef01234567";
   const f = fixture({
     nickname: "삼류",
     userSearchHttp400: true,
-    profileId: realId,
-    nicknameDatabase: { "삼류": realId },
+    profileId: id,
     posts: [post("my-old", "!'삼류'정보", "bot-id", "ty_pe")]
   });
-  const outcome = await f.bot.replyToOwnPost("삼류");
-  assert.equal(outcome.postId, "my-old");
+  const db = f.bot.useLocalDatabase({ "삼류": id });
+  assert.equal(db.saved, false);
+  assert.equal(f.bot.status().databaseLoaded, true);
+  const output = await f.bot.replyToOwnPost("삼류");
+  assert.equal(output.postId, "my-old");
   assert.equal(f.comments.length, 1);
   assert.equal(f.comments[0].target, "my-old");
   assert.match(f.comments[0].content, /삼류님의 정보/);
-  assert.equal(f.fetchCalls.filter(c => c.operation === "GITHUB_USER_DB").length, 1);
+  assert.equal(f.fetchCalls.filter(c => c.operation === "SELECT_USER_BY_NICKNAME").length, 0);
+  assert.equal(f.fetchCalls.filter(c => c.operation === "GITHUB_USER_DB").length, 0);
 });
 
-test("HTTP 400 and GitHub DB miss never falsely reply '그런 유저 없음'", async () => {
+test("HTTP 400 with no local DB shows helpful error instead of claiming nonexistent user", async () => {
   const f = fixture({
     nickname: "삼류",
     userSearchHttp400: true,
-    nicknameDatabase: {},
     posts: [post("my-old", "!'삼류'정보", "bot-id", "ty_pe")]
   });
-  await assert.rejects(f.bot.replyToOwnPost("삼류"), /닉네임 존재 여부를 확인하지 못했어요/);
+  await assert.rejects(f.bot.replyToOwnPost("삼류"), /EntryInfoBot.loadDatabase\(\)/);
   assert.equal(f.comments.length, 0);
+  assert.equal(f.fetchCalls.filter(c => c.operation === "GITHUB_USER_DB").length, 0);
+});
+
+test("empty or non-object local database cannot be loaded", async () => {
+  const f = fixture();
+  assert.throws(() => f.bot.useLocalDatabase({}), /비어 있는/);
+  assert.throws(() => f.bot.useLocalDatabase(["삼류"]), /형식/);
+  assert.equal(f.bot.status().databaseLoaded, false);
 });
 
 test("do not retry writes to prevent duplicate comments after API failure", async () => {
