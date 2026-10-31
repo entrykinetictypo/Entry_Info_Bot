@@ -52,6 +52,7 @@
   let nicknameDatabase = null; // optional private ent2-backup data.json, in memory only
 
   const Q = {
+    spaceUsers: "query getUsers($param:UserSearch!){getUsers(param:$param){total list{id nickname}}}",
     stories: "query SELECT_ENTRYSTORY($pageParam:PageParam,$category:String,$term:String,$discussType:String,$searchType:String){discussList(pageParam:$pageParam,category:$category,term:$term,discussType:$discussType,searchType:$searchType){total list{id content created user{id nickname}}}}",
     // Standard (unnamed) GraphQL syntax matches known working Entry console examples.
     byNickname: "query($nickname:String){user(nickname:$nickname){id nickname}}",
@@ -296,6 +297,34 @@
     });
   }
 
+  async function lookupViaSpace(nickname) {
+    const res = await fetch("https://space.playentry.org/graphql/getUsers", {
+      method: "POST",
+      credentials: "omit",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        operationName: "getUsers",
+        query: Q.spaceUsers,
+        variables: { param: { nickname, display: 30 } }
+      })
+    });
+    if (res.status === 429) {
+      stop("엔트리 스페이스 검색 요청 제한");
+      throw new Error("HTTP 429");
+    }
+    if (!res.ok) throw new Error("Space HTTP " + res.status);
+    const body = await res.json();
+    if (body?.errors?.length) throw new Error("Space GraphQL 오류");
+    const result = body?.data?.getUsers;
+    if (!result || !Array.isArray(result.list)) throw new Error("Space 검색 응답 오류");
+    const exact = result.list.filter(x => x?.id && x.nickname === nickname);
+    if (exact.length === 1) return { user: exact[0] };
+    if (exact.length > 1) throw new Error("동일한 닉네임의 사용자 다수");
+    const complete = Number.isInteger(result.total) &&
+      result.total >= 0 && result.total <= result.list.length;
+    return { missing: complete };
+  }
+
   async function lookupUser(nickname) {
     // Private ent2-backup data.json can be loaded manually from the user's PC.
     // It is never uploaded or cached by this script.
@@ -341,9 +370,23 @@
       log("유저 목록 검색 실패: " + error.message);
     }
     if (verifiedNoUser) return null;
+    try {
+      const space = await lookupViaSpace(nickname);
+      if (space.user) {
+        log("실시간 스페이스 API에서 닉네임 확인: " + nickname);
+        return space.user;
+      }
+      if (space.missing) {
+        log("실시간 사용자 검색에서 닉네임이 없음을 확인: " + nickname);
+        return null;
+      }
+    } catch (error) {
+      if (error.message === "HTTP 429") throw error;
+      errors.push(error.message);
+      log("스페이스 API 검색 실패: " + error.message);
+    }
     throw new Error(
-      "엔트리 닉네임 API가 응답하지 않아요. " +
-      "비공개 ent2-backup/data.json을 PC에서 받아 EntryInfoBot.loadDatabase()로 선택해 주세요. " +
+      "사용자 검색 API로 계정 존재 여부를 확인하지 못했습니다. " +
       errors.slice(-2).join(" / ")
     );
   }
