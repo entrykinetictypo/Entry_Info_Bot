@@ -1,0 +1,20 @@
+name: Node tests
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: JavaScript syntax checks
+        run: |
+          node --check src/core.js
+          node --check src/content.js
+          node --check src/background.js
+          node --check src/popup.js
+      - name: Mock browser and core tests
+        run: node --test tests/*.test.js
