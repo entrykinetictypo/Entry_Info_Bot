@@ -1,0 +1,1 @@
+Temporary notes for implementing a server-error reply safely.
