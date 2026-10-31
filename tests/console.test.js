@@ -407,3 +407,69 @@ test("profile and project statistics use ent2-backup compatible named endpoints"
   assert.equal(projects.url, "/graphql/SELECT_USER_PROJECTS");
   assert.equal(f.comments.length, 1);
 });
+
+
+test("parses optional space between closing quote and 정보, including HTML markup", async () => {
+  const f = fixture();
+  assert.equal(f.bot.parse("!'요니작가_온작' 정보"), "요니작가_온작");
+  assert.equal(f.bot.parse("!'요니작가_온작'정보"), "요니작가_온작");
+  assert.equal(f.bot.parse("<p>!&#39;요니작가_온작&#39;&nbsp;정보</p>"), "요니작가_온작");
+  assert.equal(f.bot.parse("!‘요니작가_온작’ 정보"), "요니작가_온작");
+  assert.equal(f.bot.parse("!'요니작가_온작'　정보"), "요니작가_온작");
+  assert.equal(f.bot.parse("!'요니작가_온작' 다른정보"), null);
+});
+
+test("another author requesting their own nickname bypasses the broken user search API", async () => {
+  const id = "0123456789abcdef01234567";
+  const name = "요니작가_온작";
+  const f = fixture({
+    nickname: name, profileId: id, userSearchHttp400: true
+  });
+  await f.bot.start();
+  f.setPosts([
+    post("new-spaced-post", "<p>!'요니작가_온작' 정보</p>", id, name),
+    post("old", "기존 글")
+  ]);
+  await f.bot.tick();
+  assert.equal(f.comments.length, 1);
+  assert.equal(f.comments[0].target, "new-spaced-post");
+  assert.match(f.comments[0].content, /요니작가_온작님의 정보/);
+  assert.equal(f.fetchCalls.some(x => x.operation === "SELECT_USER_BY_NICKNAME"), false);
+  assert.equal(f.fetchCalls.some(x => x.operation === "SELECT_USER_LIST"), false);
+  f.bot.stop();
+});
+
+test("inspectRecent shows exact commands without posting any comment", async () => {
+  const f = fixture({
+    posts: [post("found", "!'요니작가_온작' 정보", "user1", "요니작가_온작")]
+  });
+  const rows = await f.bot.inspectRecent();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].recognizedNickname, "요니작가_온작");
+  assert.equal(f.comments.length, 0);
+});
+
+test("replyToRecentCommand sends one explicit reply to another person's earlier spaced command", async () => {
+  const id = "0123456789abcdef01234567";
+  const f = fixture({
+    nickname: "요니작가_온작", profileId: id, userSearchHttp400: true,
+    posts: [post("old-command", "!'요니작가_온작' 정보", id, "요니작가_온작")]
+  });
+  const answer = await f.bot.replyToRecentCommand("요니작가_온작");
+  assert.equal(answer.postId, "old-command");
+  assert.equal(f.comments.length, 1);
+  assert.equal(f.comments[0].target, "old-command");
+  await assert.rejects(f.bot.replyToRecentCommand("요니작가_온작"), /이미 이 게시글에 댓글을 시도/);
+  assert.equal(f.comments.length, 1);
+});
+
+test("manual reply never posts when multiple matching recent commands are ambiguous", async () => {
+  const f = fixture({
+    posts: [
+      post("a", "!'요니작가_온작' 정보", "userA", "첫번째"),
+      post("b", "!'요니작가_온작'정보", "userB", "두번째")
+    ]
+  });
+  await assert.rejects(f.bot.replyToRecentCommand("요니작가_온작"), /여러 개/);
+  assert.equal(f.comments.length, 0);
+});

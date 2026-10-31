@@ -199,7 +199,9 @@
 
   function commandNickname(raw) {
     const command = plainText(raw);
-    const match = /^!'([^'\r\n]{1,40})'정보$/u.exec(command);
+    // Accept optional spacing before/after the nickname's quotes.
+    // Example: !'요니작가_온작' 정보 and !'요니작가_온작'정보.
+    const match = /^![ \t]*['‘’]([^'‘’\r\n]{1,40})['‘’][ \t\u00a0\u3000]*정보$/u.exec(command);
     return match && match[1].trim() ? match[1] : null;
   }
 
@@ -358,11 +360,15 @@
     throw new Error("작품이 많아 2,500개 제한 내에서 집계를 완료하지 못했어요.");
   }
 
-  async function getUserInfo(nickname) {
+  async function getUserInfo(nickname, authorHint = null) {
     if (typeof nickname !== "string" || !nickname.trim() || nickname.length > 40) {
       throw new Error("닉네임은 1~40자여야 해요.");
     }
-    const user = await lookupUser(nickname);
+    // If the Story author asks about their own nickname, the Story API already
+    // gives us their account ID. Confirm the exact nickname again via userstatus.
+    const hinted = authorHint?.id && authorHint?.nickname === nickname;
+    const user = hinted ? { id: authorHint.id, nickname } : await lookupUser(nickname);
+    if (hinted) log("작성자 닉네임과 조회 대상이 일치해 검색 API를 생략했어요: " + nickname);
     if (!user) return "그런 유저 없음";
 
     const result = await graphql("FIND_USERSTATUS_BY_USERNAME", Q.status, { id: user.id });
@@ -413,7 +419,9 @@
         log("댓글 대기열이 가득 차서 일부 명령어는 받지 않았어요.");
         return;
       }
-      state.queue.push({ id: post.id, nickname, tries: 0 });
+      state.queue.push({ id: post.id, nickname, author: {
+        id: post.user.id, nickname: post.user.nickname
+      }, tries: 0 });
       inQueue.add(post.id);
       log(post.user.nickname + "님의 게시글에서 " + nickname + " 정보 요청 감지");
     }
@@ -455,7 +463,7 @@
 
     let reply;
     try {
-      reply = await getUserInfo(item.nickname);
+      reply = await getUserInfo(item.nickname, item.author);
     } catch (error) {
       log(item.nickname + " 정보 조회 실패: " + error.message);
       item.tries += 1;
@@ -545,6 +553,81 @@
   }
 
 
+  // Read-only diagnostics: show how the bot parses recent command-looking posts.
+  async function inspectRecent() {
+    checkPage();
+    const posts = await latestStories();
+    const rows = posts.filter(post => {
+      const text = plainText(post.content);
+      return text.startsWith("!") || text.includes("정보");
+    }).map(post => {
+      const text = plainText(post.content);
+      const nickname = commandNickname(post.content);
+      return {
+        postId: post.id,
+        author: post.user?.nickname || "(알 수 없음)",
+        content: text.slice(0, 150),
+        recognizedNickname: nickname || "(인식 안 됨)",
+        replyAttempted: state.replied.has(post.id),
+        queued: state.queue.some(item => item.id === post.id)
+      };
+    });
+    console.table(rows);
+    if (!rows.length) log("최근 20개 게시글에서 정보 명령어 후보를 찾지 못했어요.");
+    return rows;
+  }
+
+  // Explicitly handle a command already posted by someone else or oneself.
+  // Never bulk-reply: require an exact nickname and a unique matching recent post.
+  async function replyToRecentCommand(nickname, authorNickname = null) {
+    checkPage();
+    if (typeof nickname !== "string" || !nickname.trim() || nickname.length > 40) {
+      throw new Error("조회할 닉네임을 입력해 주세요.");
+    }
+    const auth = credentials();
+    if (!auth.id || !auth.token || !auth.csrf) {
+      throw new Error("로그인 정보를 확인할 수 없어요.");
+    }
+    if (state.busy) throw new Error("이미 다른 명령어를 처리 중이에요. 다시 실행해 주세요.");
+    state.busy = true;
+    try {
+      const posts = await latestStories();
+      const matches = posts.filter(p => commandNickname(p.content) === nickname &&
+        (authorNickname === null || p.user?.nickname === authorNickname));
+      if (!matches.length) {
+        throw new Error("최근 20개 게시글에서 !'" + nickname +
+          "' 정보 명령어를 찾지 못했어요. EntryInfoBot.inspectRecent()로 확인해 주세요.");
+      }
+      if (matches.length > 1) {
+        throw new Error("일치하는 글이 여러 개예요. 작성자 닉네임을 두 번째 인수로 지정해 주세요.");
+      }
+      const matching = matches[0];
+      if (state.replied.has(matching.id)) {
+        throw new Error("이미 이 게시글에 댓글을 시도했어요. 중복 전송하지 않습니다.");
+      }
+      if (!rateLimitAllows()) {
+        throw new Error("댓글 제한 중이에요. 1분 간격 및 시간당 최대 10회 제한을 확인해 주세요.");
+      }
+      const reply = await getUserInfo(nickname, matching.user);
+      if (state.replied.has(matching.id)) {
+        throw new Error("이미 다른 작업이 이 게시글을 처리했어요.");
+      }
+      state.queue = state.queue.filter(item => item.id !== matching.id);
+      markReplyAttempt(matching.id);
+      try {
+        await sendComment(matching.id, reply);
+      } catch (error) {
+        log("기존 게시글 댓글 실패/확인 불가: " + error.message);
+        throw error;
+      }
+      log("✅ " + (matching.user?.nickname || "사용자") +
+        "님의 기존 게시글 " + matching.id + "에 댓글 작성 완료");
+      return { postId: matching.id, author: matching.user?.nickname || null, reply };
+    } finally {
+      state.busy = false;
+    }
+  }
+
   // Explicit one-off test for an ALREADY PUBLISHED command post by this account.
   // Never responds to somebody else's old post; only scans the most recent 20 posts.
   async function replyToOwnPost(nickname) {
@@ -573,7 +656,7 @@
         throw new Error("댓글 제한 중이에요. 1분 간격/시간당 최대 10회를 지켜 주세요.");
       }
 
-      const reply = await getUserInfo(nickname);
+      const reply = await getUserInfo(nickname, matching.user);
       if (state.replied.has(matching.id)) {
         throw new Error("다른 작업이 이미 이 게시글을 처리했어요.");
       }
@@ -620,6 +703,9 @@
     preview: () => start({ preview: true }),
     stop,
     status,
+    parse: commandNickname,
+    inspectRecent,
+    replyToRecentCommand,
     useLocalDatabase,
     loadDatabase,
     replyToOwnPost,
@@ -635,6 +721,8 @@
       "EntryInfoBot.preview() 미리보기 시작\n" +
       "EntryInfoBot.stop() 정지\n" +
       "EntryInfoBot.status() 상태 확인\n" +
+      "EntryInfoBot.inspectRecent() 최근 게시글 명령어 인식 여부 확인 (댓글 없음)\n" +
+      "await EntryInfoBot.replyToRecentCommand('요니작가_온작') 최근 글 하나에 답글 시도\n" +
       "EntryInfoBot.loadDatabase() 비공개 ent2-backup/data.json 선택 (오른쪽 위 버튼 클릭)\n" +
       "await EntryInfoBot.replyToOwnPost('삼류') 이미 올린 내 글에 댓글 작성\n" +
       "await EntryInfoBot.test('12옴') 닉네임 조회 테스트"
