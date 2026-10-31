@@ -13,9 +13,11 @@
   }
 
   const CONFIG = Object.freeze({
-    intervalMs: 30000,
-    maxRepliesPerHour: 10,
-    minReplyIntervalMs: 60000,
+    intervalMs: 15000,
+    maxRepliesPerHour: 20,
+    minReplyIntervalMs: 30000,
+    infoCacheMs: 120000,
+    negativeCacheMs: 30000,
     maxPending: 200,
     maxScanPages: 5, // scan up to 100 recent posts
     maxProjects: 2500,
@@ -50,6 +52,8 @@
     lastCheckedAt: null
   };
   let nicknameDatabase = null; // optional private ent2-backup data.json, in memory only
+  const userInfoCache = new Map(); // short-lived results; never stores authentication
+  const unsupportedUserSearch = new Set(); // avoid repeatedly retrying broken lookup queries
 
   const Q = {
     spaceUsers: "query getUsers($param:UserSearch!){getUsers(param:$param){total list{id nickname}}}",
@@ -249,6 +253,8 @@
     if (!keys.length) throw new Error("비어 있는 닉네임 DB예요.");
     // Do not persist private nickname mappings or send them to a third party.
     nicknameDatabase = data;
+    userInfoCache.clear();
+    unsupportedUserSearch.clear();
     log("🔐 ent2-backup 개인 DB 준비 완료 (" + keys.length.toLocaleString("ko-KR") +
       "명). 이 탭의 메모리에서만 사용해요.");
     return { count: keys.length, saved: false };
@@ -338,36 +344,42 @@
 
     let verifiedNoUser = false;
     const errors = [];
-    try {
-      const result = await graphql("SELECT_USER_BY_NICKNAME", Q.byNickname, { nickname });
-      const user = result.user;
-      if (user?.id && user.nickname === nickname) return user;
-      if (user === null) verifiedNoUser = true;
-    } catch (error) {
-      if (/HTTP (401|403|429)/.test(error.message)) throw error;
-      errors.push(error.message);
-      log("실시간 닉네임 검색 실패: " + error.message);
+    if (!unsupportedUserSearch.has("exact")) {
+      try {
+        const result = await graphql("SELECT_USER_BY_NICKNAME", Q.byNickname, { nickname });
+        const user = result.user;
+        if (user?.id && user.nickname === nickname) return user;
+        if (user === null) verifiedNoUser = true;
+      } catch (error) {
+        if (/HTTP (401|403|429)/.test(error.message)) throw error;
+        if (/HTTP 400\b/.test(error.message)) unsupportedUserSearch.add("exact");
+        errors.push(error.message);
+        log("실시간 닉네임 검색 실패: " + error.message);
+      }
     }
 
-    try {
-      const result = await graphql("SELECT_USER_LIST", Q.users, {
-        query: nickname,
-        pageParam: { display: 30, sort: "created" }
-      });
-      const users = result.userList;
-      if (!users || !Array.isArray(users.list)) {
-        throw new Error("유저 목록 응답 형식 오류");
+    if (!unsupportedUserSearch.has("list")) {
+      try {
+        const result = await graphql("SELECT_USER_LIST", Q.users, {
+          query: nickname,
+          pageParam: { display: 30, sort: "created" }
+        });
+        const users = result.userList;
+        if (!users || !Array.isArray(users.list)) {
+          throw new Error("유저 목록 응답 형식 오류");
+        }
+        const exact = users.list.filter(u => u?.id && u.nickname === nickname);
+        if (exact.length === 1) return exact[0];
+        if (exact.length > 1) throw new Error("동일 닉네임을 가진 계정이 여러 개여서 확인할 수 없어요.");
+        if (typeof users.total === "number" && users.total <= users.list.length) {
+          verifiedNoUser = true;
+        }
+      } catch (error) {
+        if (/HTTP (401|403|429)/.test(error.message)) throw error;
+        if (/HTTP 400\b/.test(error.message)) unsupportedUserSearch.add("list");
+        errors.push(error.message);
+        log("유저 목록 검색 실패: " + error.message);
       }
-      const exact = users.list.filter(u => u?.id && u.nickname === nickname);
-      if (exact.length === 1) return exact[0];
-      if (exact.length > 1) throw new Error("동일 닉네임을 가진 계정이 여러 개여서 확인할 수 없어요.");
-      if (typeof users.total === "number" && users.total <= users.list.length) {
-        verifiedNoUser = true;
-      }
-    } catch (error) {
-      if (/HTTP (401|403|429)/.test(error.message)) throw error;
-      errors.push(error.message);
-      log("유저 목록 검색 실패: " + error.message);
     }
     if (verifiedNoUser) return null;
     try {
@@ -439,7 +451,31 @@
     throw new Error("작품이 많아 2,500개 제한 내에서 집계를 완료하지 못했어요.");
   }
 
-  async function getUserInfo(nickname, authorHint = null) {
+  function getUserInfo(nickname, authorHint = null) {
+    const existing = userInfoCache.get(nickname);
+    if (existing && existing.expiresAt > Date.now()) return existing.promise;
+    if (existing) userInfoCache.delete(nickname);
+
+    const promise = fetchUserInfo(nickname, authorHint);
+    userInfoCache.set(nickname, {
+      promise,
+      expiresAt: Date.now() + CONFIG.infoCacheMs
+    });
+    promise.then(result => {
+      const record = userInfoCache.get(nickname);
+      if (record?.promise === promise) {
+        record.expiresAt = Date.now() +
+          (result === "그런 유저 없음" ? CONFIG.negativeCacheMs : CONFIG.infoCacheMs);
+      }
+    }, () => {
+      if (userInfoCache.get(nickname)?.promise === promise) {
+        userInfoCache.delete(nickname);
+      }
+    });
+    return promise;
+  }
+
+  async function fetchUserInfo(nickname, authorHint = null) {
     if (typeof nickname !== "string" || !nickname.trim() || nickname.length > 40) {
       throw new Error("닉네임은 1~40자여야 해요.");
     }
@@ -679,6 +715,12 @@
       state.newestId = existing[0]?.id || null;
       // Preserve queued requests recovered from localStorage.
       state.timer = setInterval(() => { tick(); }, CONFIG.intervalMs);
+      // Do not add another full polling delay for requests restored on launch.
+      if (state.queue.length) {
+        Promise.resolve().then(() => {
+          if (state.running && !state.busy) tick();
+        });
+      }
       log(state.preview
         ? "👀 미리보기 모드 시작 (댓글을 게시하지 않아요)"
         : "🤖 자동 댓글 시작: 이후 올라오는 모든 사용자의 명령어 글(내 글 포함)에 댓글을 답니다.");
@@ -787,6 +829,10 @@
       lastCheckedAt: state.lastCheckedAt
         ? new Date(state.lastCheckedAt).toLocaleString("ko-KR") : "아직 없음",
       databaseLoaded: Boolean(nicknameDatabase),
+      cachedProfiles: userInfoCache.size,
+      pollIntervalSeconds: CONFIG.intervalMs / 1000,
+      replyGapSeconds: CONFIG.minReplyIntervalMs / 1000,
+      hourlyReplyLimit: CONFIG.maxRepliesPerHour,
       recentLogs: state.logs.slice(-5)
     };
     console.table({
@@ -795,7 +841,11 @@
       "대기 중": result.queued,
       "최근 1시간 댓글 시도": result.repliesAttemptedLastHour,
       "최근 조회": result.lastCheckedAt,
-      "로컬 DB 준비": result.databaseLoaded
+      "로컬 DB 준비": result.databaseLoaded,
+      "프로필 캐시": result.cachedProfiles,
+      "글 확인 간격(초)": result.pollIntervalSeconds,
+      "댓글 간격(초)": result.replyGapSeconds,
+      "시간당 최대 댓글": result.hourlyReplyLimit
     });
     return result;
   }
