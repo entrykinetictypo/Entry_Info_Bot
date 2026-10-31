@@ -716,10 +716,14 @@
       // Preserve queued requests recovered from localStorage.
       state.timer = setInterval(() => { tick(); }, CONFIG.intervalMs);
       // Do not add another full polling delay for requests restored on launch.
-      if (state.queue.length) {
-        Promise.resolve().then(() => {
-          if (state.running && !state.busy) tick();
-        });
+      if (state.queue.length && !state.busy) {
+        // Flush immediately in a single awaited task, preventing a race with tick().
+        state.busy = true;
+        try {
+          await processQueue();
+        } finally {
+          state.busy = false;
+        }
       }
       log(state.preview
         ? "👀 미리보기 모드 시작 (댓글을 게시하지 않아요)"
