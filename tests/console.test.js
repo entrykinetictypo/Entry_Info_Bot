@@ -63,9 +63,27 @@ function fixture(options = {}) {
       }
     },
     fetch: async (url, init) => {
-      const operation = url.split("/").at(-1);
+      const route = url.split("/").at(-1);
+      if (url.startsWith("https://raw.githubusercontent.com/")) {
+        fetchCalls.push({ operation: "GITHUB_USER_DB", request: null, init, url });
+        if (options.githubDbFails) {
+          return { ok: false, status: 404, json: async () => ({}) };
+        }
+        return { ok: true, status: 200,
+          json: async () => options.nicknameDatabase || {} };
+      }
       const request = JSON.parse(init.body);
-      fetchCalls.push({ operation, request, init });
+      const operation = route === "graphql" ?
+        (request.query.includes("user(nickname:") ? "SELECT_USER_BY_NICKNAME" :
+          /\b(?:query|mutation)\s+([A-Z_][A-Z_0-9]*)/.exec(request.query)?.[1]) :
+        route;
+      fetchCalls.push({ operation, request, init, url });
+      if (options.userSearchHttp400 &&
+          ["SELECT_USER_BY_NICKNAME", "SELECT_USER_LIST"].includes(operation)) {
+        return { ok: false, status: 400, json: async () => ({
+          errors: [{ message: "Unknown operation at the requested endpoint" }]
+        }) };
+      }
       if (failStatus && operation === "SELECT_ENTRYSTORY") {
         return { ok: false, status: failStatus, json: async () => ({}) };
       }
@@ -88,7 +106,7 @@ function fixture(options = {}) {
             }) };
           }
           data = { userstatus: {
-            id: "profile-id",
+            id: options.profileId || "profile-id",
             nickname: nicknameFound ? options.nickname || "12옴" : "unknown",
             status: { project: 2, follower: 1234, following: 30 }
           } };
@@ -317,3 +335,55 @@ test("one-off reply can only target the exact nickname command", async () => {
   assert.equal(f.comments.length, 0);
 });
 
+
+
+test("user lookup and comment use generic /graphql instead of broken /graphql/SELECT_USER endpoints", async () => {
+  const f = fixture();
+  await f.bot.start();
+  f.setPosts([post("generic-path", "!'12옴'정보"), post("old", "기존 글")]);
+  await f.bot.tick();
+  const usernameCalls = f.fetchCalls.filter(c =>
+    ["SELECT_USER_BY_NICKNAME", "SELECT_USER_LIST"].includes(c.operation));
+  assert.ok(usernameCalls.length >= 1);
+  assert.ok(usernameCalls.every(c => c.url === "/graphql"));
+  const commentCall = f.fetchCalls.find(c => c.operation === "CREATE_COMMENT");
+  assert.equal(commentCall.url, "/graphql");
+  assert.equal(f.comments.length, 1);
+  f.bot.stop();
+});
+
+test("HTTP 400 on user endpoints falls back to ent2-backup/data.json and verifies profile", async () => {
+  const realId = "0123456789abcdef01234567";
+  const f = fixture({
+    nickname: "삼류",
+    userSearchHttp400: true,
+    profileId: realId,
+    nicknameDatabase: { "삼류": realId },
+    posts: [post("my-old", "!'삼류'정보", "bot-id", "ty_pe")]
+  });
+  const outcome = await f.bot.replyToOwnPost("삼류");
+  assert.equal(outcome.postId, "my-old");
+  assert.equal(f.comments.length, 1);
+  assert.equal(f.comments[0].target, "my-old");
+  assert.match(f.comments[0].content, /삼류님의 정보/);
+  assert.equal(f.fetchCalls.filter(c => c.operation === "GITHUB_USER_DB").length, 1);
+});
+
+test("HTTP 400 and GitHub DB miss never falsely reply '그런 유저 없음'", async () => {
+  const f = fixture({
+    nickname: "삼류",
+    userSearchHttp400: true,
+    nicknameDatabase: {},
+    posts: [post("my-old", "!'삼류'정보", "bot-id", "ty_pe")]
+  });
+  await assert.rejects(f.bot.replyToOwnPost("삼류"), /닉네임 존재 여부를 확인하지 못했어요/);
+  assert.equal(f.comments.length, 0);
+});
+
+test("do not retry writes to prevent duplicate comments after API failure", async () => {
+  const f = fixture({ nickname: "삼류", posts: [post("my-old", "!'삼류'정보", "bot-id", "ty_pe")] });
+  await f.bot.replyToOwnPost("삼류");
+  assert.equal(f.fetchCalls.filter(c => c.operation === "CREATE_COMMENT").length, 1);
+  await assert.rejects(f.bot.replyToOwnPost("삼류"), /이미 이 게시글에 댓글을 시도/);
+  assert.equal(f.fetchCalls.filter(c => c.operation === "CREATE_COMMENT").length, 1);
+});

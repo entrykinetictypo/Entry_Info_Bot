@@ -47,7 +47,8 @@
 
   const Q = {
     stories: "query SELECT_ENTRYSTORY($pageParam:PageParam,$category:String,$term:String,$discussType:String,$searchType:String){discussList(pageParam:$pageParam,category:$category,term:$term,discussType:$discussType,searchType:$searchType){total list{id content created user{id nickname}}}}",
-    byNickname: "query SELECT_USER_BY_NICKNAME($nickname:String!){user(nickname:$nickname){id nickname}}",
+    // Standard (unnamed) GraphQL syntax matches known working Entry console examples.
+    byNickname: "query($nickname:String){user(nickname:$nickname){id nickname}}",
     users: "query SELECT_USER_LIST($query:String,$pageParam:PageParam){userList(query:$query,pageParam:$pageParam){total list{id nickname}}}",
     status: "query FIND_USERSTATUS_BY_USERNAME($id:String){userstatus(id:$id){id nickname status{project follower following}}}",
     projects: "query SELECT_USER_PROJECTS($user:String!,$pageParam:PageParam,$searchAfter:JSON,$searchType:String,$term:String,$isOpen:String){userProjectList(user:$user,pageParam:$pageParam,searchAfter:$searchAfter,searchType:$searchType,term:$term,isOpen:$isOpen){total searchAfter list{id isopen ranked staffPicked}}}",
@@ -134,28 +135,45 @@
     };
     if (write) headers["x-token"] = auth.token;
 
-    const response = await fetch("/graphql/" + name, {
+    // PlayEntry's generic GraphQL route also supports unregistered query names.
+    // In particular, /graphql/SELECT_USER_BY_NICKNAME and /graphql/SELECT_USER_LIST
+    // can return HTTP 400 although generic /graphql handles the same user fields.
+    const endpoint = name === "SELECT_ENTRYSTORY"
+      ? "/graphql/SELECT_ENTRYSTORY" : "/graphql";
+    const response = await fetch(endpoint, {
       method: "POST",
       credentials: "include",
       headers,
       body: JSON.stringify({ query, variables })
     });
-    if (response.status === 429 || response.status === 401 || response.status === 403) {
-      stop("서버가 요청을 제한하거나 인증을 거부함 (HTTP " + response.status + ")");
-      throw new Error("HTTP " + response.status + ": 서버 요청 제한 또는 인증 오류");
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (_) {
+      // Some API failures return non-JSON bodies.
     }
-    if (!response.ok) throw new Error(name + " HTTP " + response.status);
+    const apiError = String(
+      payload?.errors?.[0]?.message || payload?.message || payload?.error || ""
+    ).slice(0, 180);
 
-    const data = await response.json();
-    if (Array.isArray(data.errors) && data.errors.length) {
-      const message = String(data.errors[0]?.message || "알 수 없는 오류");
+    if ([401, 403, 429].includes(response.status)) {
+      stop("서버가 요청을 제한하거나 인증을 거부함 (HTTP " + response.status + ")");
+      throw new Error("HTTP " + response.status + ": 요청 제한/인증 오류" +
+        (apiError ? " · " + apiError : ""));
+    }
+    if (!response.ok) {
+      throw new Error(name + " HTTP " + response.status +
+        (apiError ? " · " + apiError : ""));
+    }
+    if (Array.isArray(payload?.errors) && payload.errors.length) {
+      const message = apiError || "알 수 없는 GraphQL 오류";
       if (/captcha|rate.limit|too.many|forbidden|unauthorized|도배|차단/i.test(message)) {
         stop("엔트리 서버 제한 감지: " + message);
       }
       throw new Error(name + ": " + message);
     }
-    if (!data.data) throw new Error(name + ": 정상적인 응답이 아니에요.");
-    return data.data;
+    if (!payload?.data) throw new Error(name + ": 정상적인 응답이 아니에요.");
+    return payload.data;
   }
 
   function plainText(raw) {
@@ -176,36 +194,91 @@
     return match && match[1].trim() ? match[1] : null;
   }
 
+  let nicknameDatabasePromise = null;
+
+  async function ent2NicknameDatabase() {
+    // Fallback: ent2-backup bundles nickname -> user ID mappings in data.json.
+    // The 8MB index is fetched only if the live API lookup fails, and cached in memory.
+    if (!nicknameDatabasePromise) {
+      log("실시간 닉네임 검색 실패 · ent2-backup 사용자 데이터베이스 확인 중...");
+      nicknameDatabasePromise = fetch(
+        "https://raw.githubusercontent.com/entrykinetictypo/ent2-backup/main/data.json",
+        { method: "GET", cache: "force-cache" }
+      ).then(async response => {
+        if (!response.ok) throw new Error("GitHub DB HTTP " + response.status);
+        const data = await response.json();
+        if (!data || typeof data !== "object" || Array.isArray(data)) {
+          throw new Error("GitHub DB 응답 형식 오류");
+        }
+        return data;
+      }).catch(error => {
+        nicknameDatabasePromise = null;
+        throw error;
+      });
+    }
+    return nicknameDatabasePromise;
+  }
+
   async function lookupUser(nickname) {
-    // The exact-nickname API is preferred. A failed API is not proof that a user is missing.
+    const errors = [];
+    let verifiedNoUser = false;
+
+    // 1. The generic /graphql route (rather than /graphql/SELECT_USER_BY_NICKNAME).
     try {
       const response = await graphql("SELECT_USER_BY_NICKNAME", Q.byNickname, { nickname });
       const user = response.user;
       if (user?.id && user.nickname === nickname) return user;
+      if (user === null) verifiedNoUser = true;
     } catch (error) {
-      if (!state.running && state.starting === false && /HTTP 429|HTTP 401|HTTP 403/.test(error.message)) {
-        throw error;
-      }
-      log("직접 닉네임 검색 실패, 목록 검색으로 재확인: " + error.message);
+      if (!state.running && /HTTP (401|403|429)/.test(error.message)) throw error;
+      errors.push(error.message);
+      log("실시간 닉네임 검색 실패: " + error.message);
     }
 
-    const result = await graphql("SELECT_USER_LIST", Q.users, {
-      query: nickname,
-      pageParam: { display: 30, sort: "created" }
-    });
-    const users = result.userList;
-    if (!users || !Array.isArray(users.list)) {
-      throw new Error("검색 결과를 확인할 수 없어요.");
+    // 2. Live partial user list, useful if the exact endpoint is unavailable.
+    try {
+      const response = await graphql("SELECT_USER_LIST", Q.users, {
+        query: nickname,
+        pageParam: { display: 30, sort: "created" }
+      });
+      const users = response.userList;
+      if (!users || !Array.isArray(users.list)) {
+        throw new Error("유저 목록 응답 형식 오류");
+      }
+      const matched = users.list.filter(u => u?.id && u.nickname === nickname);
+      if (matched.length > 1) {
+        throw new Error("동일 닉네임 유저가 여러 명 발견되어 조회를 중단했어요.");
+      }
+      if (matched.length === 1) return matched[0];
+      if (typeof users.total === "number" && users.total <= users.list.length) {
+        verifiedNoUser = true;
+      }
+    } catch (error) {
+      if (!state.running && /HTTP (401|403|429)/.test(error.message)) throw error;
+      errors.push(error.message);
+      log("유저 목록 검색 실패: " + error.message);
     }
-    const matches = users.list.filter(user => user?.id && user.nickname === nickname);
-    if (matches.length > 1) {
-      throw new Error("동일한 닉네임이 여러 계정에서 발견되어 조회를 중단했어요.");
+
+    // 3. Local lookup using the published ent2-backup nickname -> ID snapshot.
+    // Database misses are not sufficient proof of nonexistence (nickname may be new).
+    try {
+      const db = await ent2NicknameDatabase();
+      if (Object.prototype.hasOwnProperty.call(db, nickname)) {
+        const id = db[nickname];
+        if (typeof id === "string" && /^[0-9a-f]{24}$/i.test(id)) {
+          log("ent2-backup에서 유저 ID를 찾았어요: " + nickname);
+          return { id, nickname };
+        }
+        throw new Error("GitHub DB의 유저 ID 형식 오류");
+      }
+    } catch (error) {
+      errors.push("GitHub DB: " + error.message);
+      log("닉네임 DB 확인 실패: " + error.message);
     }
-    if (matches.length === 1) return matches[0];
-    if (Number(users.total) > users.list.length) {
-      throw new Error("검색 결과가 너무 많아서 계정이 없는지 판단할 수 없어요.");
-    }
-    return null;
+
+    if (verifiedNoUser) return null;
+    throw new Error("닉네임 존재 여부를 확인하지 못했어요. " +
+      (errors.length ? errors.slice(-2).join(" / ") : "검색 결과가 불완전해요."));
   }
 
   async function projectCounts(userId, expectedPublicCount) {
