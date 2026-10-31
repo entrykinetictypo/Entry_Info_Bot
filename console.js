@@ -541,13 +541,22 @@
         : await getUserInfo(item.nickname, item.author);
     } catch (error) {
       log(item.nickname + " 정보 조회 실패: " + error.message);
-      item.tries += 1;
-      if (item.tries >= CONFIG.maxRetries || !state.running) {
-        state.queue.shift();
+      if (!state.running) {
         saveQueue();
-        log("조회 실패로 해당 명령어를 건너뛰었어요.");
+        return;
       }
-      return;
+      item.tries = (item.tries || 0) + 1;
+      if (item.tries < CONFIG.maxRetries) {
+        state.queue.shift();
+        state.queue.push(item);
+        saveQueue();
+        log("닉네임 조회 재시도 예정 (" + item.tries + "/" + CONFIG.maxRetries + ")");
+        return;
+      }
+      reply = "⚠️ 현재 유저 정보를 확인할 수 없습니다.\n" +
+        "조회 대상: " + item.nickname + "\n" +
+        "검색 서버 오류가 발생했습니다. 잠시 후 다시 요청해 주세요.";
+      log("조회 실패 안내 댓글 준비: " + item.nickname);
     }
     if (!state.running || state.queue[0] !== item) return;
 
