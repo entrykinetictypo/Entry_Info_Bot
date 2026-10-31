@@ -169,16 +169,19 @@ test("nonexistent exact nickname replies with the requested message", async () =
   f.bot.stop();
 });
 
-test("bot ignores its own posts and malformed commands", async () => {
+test("bot responds to its own new command post, but ignores malformed commands", async () => {
   const f = fixture();
   await f.bot.start();
   f.setPosts([
     post("wrong", "!12옴정보"),
-    post("mine", "!'12옴'정보", "bot-id", "봇"),
+    post("mine", "!'12옴'정보", "bot-id", "ty_pe"),
     post("old", "기존 글")
   ]);
   await f.bot.tick();
-  assert.equal(f.comments.length, 0);
+  assert.equal(f.comments.length, 1);
+  assert.equal(f.comments[0].target, "mine");
+  await f.bot.tick();
+  assert.equal(f.comments.length, 1);
   f.bot.stop();
 });
 
@@ -273,3 +276,44 @@ test("no tokens are saved to localStorage", async () => {
   assert.ok(!stored.includes("csrf-from-page"));
   f.bot.stop();
 });
+
+test("one-off reply works for the user's own pre-existing '삼류' Story even when watcher is off", async () => {
+  const f = fixture({
+    nickname: "삼류",
+    posts: [
+      post("mine-old", "!'삼류'정보", "bot-id", "ty_pe"),
+      post("someone-old", "기존 글", "another", "다른 사용자")
+    ]
+  });
+  const reply = await f.bot.replyToOwnPost("삼류");
+  assert.equal(reply.postId, "mine-old");
+  assert.equal(f.comments.length, 1);
+  assert.equal(f.comments[0].target, "mine-old");
+  assert.match(f.comments[0].content, /삼류님의 정보/);
+  assert.equal(f.bot.status().running, false);
+});
+
+test("one-off reply never targets somebody else's old Story", async () => {
+  const f = fixture({
+    posts: [post("other-old", "!'삼류'정보", "other-id", "다른 사용자")]
+  });
+  await assert.rejects(f.bot.replyToOwnPost("삼류"), /내 .* 게시글을 찾지 못했어요/);
+  assert.equal(f.comments.length, 0);
+});
+
+test("one-off reply cannot post twice to the same Story", async () => {
+  const f = fixture({ nickname: "삼류", posts: [post("mine-old", "!'삼류'정보", "bot-id", "ty_pe")] });
+  await f.bot.replyToOwnPost("삼류");
+  await assert.rejects(f.bot.replyToOwnPost("삼류"), /이미 이 게시글에 댓글을 시도/);
+  assert.equal(f.comments.length, 1);
+});
+
+test("one-off reply can only target the exact nickname command", async () => {
+  const f = fixture({
+    nickname: "삼류",
+    posts: [post("mine-old", "!'다른닉'정보", "bot-id", "ty_pe")]
+  });
+  await assert.rejects(f.bot.replyToOwnPost("삼류"), /찾지 못했어요/);
+  assert.equal(f.comments.length, 0);
+});
+

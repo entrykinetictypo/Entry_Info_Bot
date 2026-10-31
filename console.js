@@ -300,11 +300,11 @@
   }
 
   function enqueue(newPosts) {
-    const ownId = credentials().id;
     const inQueue = new Set(state.queue.map(p => p.id));
     for (const post of newPosts) {
       const nickname = commandNickname(post.content);
-      if (!post.id || !post.user?.id || post.user.id === ownId || !nickname ||
+      // Own posts are valid too: the bot answers them as a comment, not a new post.
+      if (!post.id || !post.user?.id || !nickname ||
           state.replied.has(post.id) || inQueue.has(post.id)) continue;
       if (state.queue.length >= CONFIG.maxPending) {
         log("댓글 대기열이 가득 차서 일부 명령어는 받지 않았어요.");
@@ -434,10 +434,58 @@
       state.timer = setInterval(() => { tick(); }, CONFIG.intervalMs);
       log(state.preview
         ? "👀 미리보기 모드 시작 (댓글을 게시하지 않아요)"
-        : "🤖 자동 댓글 시작: 이후 올라오는 다른 사람의 명령어 글에 댓글을 답니다.");
+        : "🤖 자동 댓글 시작: 이후 올라오는 모든 사용자의 명령어 글(내 글 포함)에 댓글을 답니다.");
       return status();
     } finally {
       if (generation === state.generation) state.starting = false;
+    }
+  }
+
+
+  // Explicit one-off test for an ALREADY PUBLISHED command post by this account.
+  // Never responds to somebody else's old post; only scans the most recent 20 posts.
+  async function replyToOwnPost(nickname) {
+    checkPage();
+    if (typeof nickname !== "string" || !nickname.trim() || nickname.length > 40) {
+      throw new Error("1~40자의 닉네임을 지정해 주세요. 예: EntryInfoBot.replyToOwnPost('삼류')");
+    }
+    const auth = credentials();
+    if (!auth.id || !auth.token || !auth.csrf) {
+      throw new Error("엔트리 로그인 정보가 없어요. 로그인 후 새로고침해 주세요.");
+    }
+    if (state.busy) throw new Error("다른 게시글을 처리 중이에요. 잠시 후 다시 실행해 주세요.");
+    state.busy = true;
+    try {
+      const posts = await latestStories();
+      const matching = posts.find(p => p?.user?.id === auth.id &&
+        commandNickname(p.content) === nickname);
+      if (!matching) {
+        throw new Error("최근 20개 글에서 내 !'" + nickname +
+          "'정보 게시글을 찾지 못했어요. 이전 글은 자동 답변하지 않습니다.");
+      }
+      if (state.replied.has(matching.id)) {
+        throw new Error("이미 이 게시글에 댓글을 시도했어요. 중복 댓글은 작성하지 않습니다.");
+      }
+      if (!rateLimitAllows()) {
+        throw new Error("댓글 제한 중이에요. 1분 간격/시간당 최대 10회를 지켜 주세요.");
+      }
+
+      const reply = await getUserInfo(nickname);
+      if (state.replied.has(matching.id)) {
+        throw new Error("다른 작업이 이미 이 게시글을 처리했어요.");
+      }
+      state.queue = state.queue.filter(item => item.id !== matching.id);
+      markReplyAttempt(matching.id);
+      try {
+        await sendComment(matching.id, reply);
+      } catch (error) {
+        log("기존 내 글 댓글 실패/확인 불가: " + error.message);
+        throw error;
+      }
+      log("✅ 기존 내 게시글 " + matching.id + "에 댓글 작성 완료");
+      return { postId: matching.id, reply };
+    } finally {
+      state.busy = false;
     }
   }
 
@@ -467,6 +515,7 @@
     preview: () => start({ preview: true }),
     stop,
     status,
+    replyToOwnPost,
     test: async nickname => {
       checkPage();
       const reply = await getUserInfo(String(nickname || "").trim());
@@ -479,6 +528,7 @@
       "EntryInfoBot.preview() 미리보기 시작\n" +
       "EntryInfoBot.stop() 정지\n" +
       "EntryInfoBot.status() 상태 확인\n" +
+      "await EntryInfoBot.replyToOwnPost('삼류') 이미 올린 내 글에 댓글 작성\n" +
       "await EntryInfoBot.test('12옴') 닉네임 조회 테스트"
     )
   };
@@ -488,7 +538,7 @@
   api.help();
   if (typeof window.confirm === "function" &&
       window.confirm(
-        "Entry Info Bot: 엔트리 이야기에 다른 사람이 !'닉네임'정보를 올리면\n" +
+        "Entry Info Bot: 엔트리 이야기에 사용자가 !'닉네임'정보를 올리면(내 글 포함)\n" +
         "현재 로그인한 계정으로 해당 게시글에 댓글을 자동 작성합니다.\n\n" +
         "엔트리 운영 정책을 확인했고 자동 댓글을 실행할까요?"
       )) {
