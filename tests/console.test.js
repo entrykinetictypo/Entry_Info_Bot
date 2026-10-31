@@ -31,7 +31,7 @@ function fixture(options = {}) {
     console: quiet,
     Date: MockDate,
     setInterval(fn, ms) {
-      assert.equal(ms, 30000);
+      assert.equal(ms, 15000);
       interval = fn;
       return 1;
     },
@@ -720,4 +720,59 @@ test("inspectRecent labels malformed nickname command as format error", async ()
   assert.equal(rows[0].classification, "형식 오류 → 사용법 안내");
   assert.equal(rows[0].recognizedNickname, "김곤충");
   assert.equal(f.comments.length, 0);
+});
+
+
+test("faster watcher remains limited to 15-second polls and 20 replies per hour", async () => {
+  const f = fixture();
+  await f.bot.start();
+  const s = f.bot.status();
+  assert.equal(s.pollIntervalSeconds, 15);
+  assert.equal(s.replyGapSeconds, 30);
+  assert.equal(s.hourlyReplyLimit, 20);
+  f.bot.stop();
+});
+
+test("repeat nickname requests reuse completed profile and project queries for two minutes", async () => {
+  const f = fixture();
+  await f.bot.start();
+  f.setPosts([
+    post("two", "!'12옴'정보", "another2", "B"),
+    post("one", "!'12옴'정보", "another1", "A"),
+    post("old", "이미 있던 글")
+  ]);
+  await f.bot.tick();
+  assert.equal(f.comments.length, 1);
+  const count = operation => f.fetchCalls.filter(c => c.operation === operation).length;
+  assert.equal(count("FIND_USERSTATUS_BY_USERNAME"), 1);
+  assert.equal(count("SELECT_USER_PROJECTS"), 1);
+  f.advanceTime(31000);
+  await f.bot.tick();
+  assert.equal(f.comments.length, 2);
+  assert.equal(count("FIND_USERSTATUS_BY_USERNAME"), 1);
+  assert.equal(count("SELECT_USER_PROJECTS"), 1);
+  f.bot.stop();
+});
+
+test("profile cache expires after two minutes and does not indefinitely freeze statistics", async () => {
+  const f = fixture();
+  await f.bot.test("12옴");
+  const count = () => f.fetchCalls.filter(c =>
+    c.operation === "FIND_USERSTATUS_BY_USERNAME").length;
+  assert.equal(count(), 1);
+  f.advanceTime(60000);
+  await f.bot.test("12옴");
+  assert.equal(count(), 1);
+  f.advanceTime(61000);
+  await f.bot.test("12옴");
+  assert.equal(count(), 2);
+});
+
+test("a broken HTTP 400 user resolver is skipped after first observed failure", async () => {
+  const f = fixture({ userSearchHttp400: true });
+  await assert.rejects(f.bot.test("없는계정1"), /검색 API|닉네임/);
+  await assert.rejects(f.bot.test("없는계정2"), /검색 API|닉네임/);
+  const count = name => f.fetchCalls.filter(c => c.operation === name).length;
+  assert.equal(count("SELECT_USER_BY_NICKNAME"), 1);
+  assert.equal(count("SELECT_USER_LIST"), 1);
 });
