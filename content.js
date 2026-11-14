@@ -10,18 +10,43 @@ const Q = {
 };
 let busy = false;
 
-function account() {
-  let data = globalThis.__NEXT_DATA__;
-  if (!data) {
-    try { data = JSON.parse(document.getElementById("__NEXT_DATA__")?.textContent || "{}"); }
-    catch (_) { data = {}; }
+// Content scripts run in an isolated world. Read the shared __NEXT_DATA__
+// element first, then refresh session information from Entry's own home page.
+// This avoids reading inaccessible page globals or asking for passwords.
+async function account() {
+  const current = globalThis.EntryBotAuth.readDocument(document);
+  if (globalThis.EntryBotAuth.complete(current)) return current;
+
+  let fresh = null;
+  let fetchProblem = "";
+  try {
+    const response = await fetch("https://playentry.org/", {
+      credentials: "include",
+      cache: "no-store",
+      headers: { "accept": "text/html" },
+      signal: AbortSignal.timeout(10000)
+    });
+    if (!response.ok) {
+      fetchProblem = "홈페이지 HTTP " + response.status;
+    } else {
+      const doc = new DOMParser().parseFromString(await response.text(), "text/html");
+      fresh = globalThis.EntryBotAuth.readDocument(doc);
+      if (globalThis.EntryBotAuth.complete(fresh)) return fresh;
+    }
+  } catch (error) {
+    fetchProblem = String(error?.message || error).slice(0,120);
   }
-  const user = data?.props?.pageProps?.initialState?.common?.user ||
-    data?.props?.initialState?.common?.user || null;
-  const csrf = document.querySelector('meta[name="csrf-token"]')?.content ||
-    document.querySelector('meta[name="csrf"]')?.content ||
-    data?.props?.initialProps?.csrfToken || "";
-  return { id: user?.id || "", token: user?.xToken || "", csrf };
+
+  // Never mix an account ID from one snapshot with a token from another:
+  // the tab might have changed accounts since the initial HTML was rendered.
+  const observed = fresh || current;
+  const missing = [];
+  if (!observed.id) missing.push("계정 ID");
+  if (!observed.token) missing.push("xToken");
+  if (!observed.csrf) missing.push("CSRF 토큰");
+  throw new Error("엔트리 로그인 세션 확인 실패 (" + missing.join(", ") + " 없음)." +
+    " 엔트리이야기에서 로그인한 뒤 페이지를 새로고침해 주세요." +
+    (fetchProblem ? " [" + fetchProblem + "]" : ""));
 }
 
 function loadState(userId) {
@@ -111,9 +136,7 @@ async function tick(dryRun) {
     const [storage] = await Promise.all([chrome.storage.local.get(["settings", "running"])]);
     if (!dryRun && storage.running !== true) return { ok: false, message: "중지 상태입니다." };
     const settings = core.normalizeSettings(storage.settings);
-    const auth = account();
-    if (!auth.id || !auth.csrf || !auth.token)
-      throw new Error("엔트리 로그인 계정과 인증 정보가 필요합니다.");
+    const auth = await account();
     const state = loadState(auth.id);
     const posts = await scanStories(auth);
     const anchor = core.storyAnchor(posts, auth.id);
@@ -199,7 +222,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   }
   if (message.type === "ENTRY_BOT_DRAFT") {
     (async () => {
-      const auth = account();
+      const auth = await account();
       if (!auth.id) throw new Error("로그인 계정을 찾을 수 없습니다.");
       return loadState(auth.id).pendingPost;
     })().then(draft => reply({ ok: true, draft }))
@@ -208,7 +231,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   }
   if (message.type === "ENTRY_BOT_CLEAR_DRAFT") {
     (async () => {
-      const auth = account();
+      const auth = await account();
       if (!auth.id) throw new Error("로그인 계정을 찾을 수 없습니다.");
       const state = loadState(auth.id);
       state.pendingPost = null;
