@@ -79,10 +79,17 @@ async function dispatch(dryRun) {
   }
 }
 
-chrome.runtime.onInstalled.addListener(async () => {
+chrome.runtime.onInstalled.addListener(async details => {
   await ensureAlarm();
   const { running } = await chrome.storage.local.get("running");
-  if (typeof running !== "boolean") await chrome.storage.local.set({ running: false });
+  if (details.reason === "update") {
+    // The comment target changed from our own post to someone else's.
+    // Require the user to deliberately start the updated behavior.
+    await chrome.storage.local.set({ running: false });
+    await saveStatus({ message: "v2.2 업데이트: 댓글 대상이 다른 사람의 최근 글로 변경됐습니다. 설정 확인 후 다시 시작하세요.", lastError: "" });
+  } else if (typeof running !== "boolean") {
+    await chrome.storage.local.set({ running: false });
+  }
 });
 chrome.runtime.onStartup.addListener(ensureAlarm);
 
