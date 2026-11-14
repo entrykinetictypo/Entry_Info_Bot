@@ -265,7 +265,7 @@ async function tick(dryRun) {
     }
 
     const newMessages = core.parseMessages(settings.postMessages);
-    const countReady = Number.isFinite(anchor.countAbove) &&
+    const countReady = Number.isFinite(anchor?.countAbove) &&
       anchor.countAbove >= settings.countThreshold;
     const timeReady = Number.isFinite(age) &&
       age >= settings.timeThresholdMinutes;
