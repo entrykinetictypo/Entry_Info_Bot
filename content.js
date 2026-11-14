@@ -260,7 +260,9 @@ async function tick(dryRun) {
       report.postStatus = "최근 24시간 새 글 한도 도달 (" +
         state.postAttempts.length + "/" + settings.postsPerDay + ")";
     } else if (state.lastPostAnchor === anchor.id) {
-      report.postStatus = "현재 내 글을 기준으로 이미 처리함";
+      report.postStatus = state.pendingPost?.sourceId === anchor.id
+        ? "현재 내 글의 초안이 이미 있음 (초안 비우기로 다시 설정 가능)"
+        : "현재 내 글을 기준으로 이미 처리함";
     } else if (!core.shouldPost(settings, anchor.countAbove, age)) {
       const countText = Number.isFinite(anchor.countAbove)
         ? anchor.countAbove + (anchor.countIsLowerBound ? "개 이상" : "개")
@@ -329,6 +331,14 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       const state = loadState(auth.id);
       if (message.type === "ENTRY_BOT_DRAFT")
         return { ok: true, draft: state.pendingPost };
+      // Clearing an unpublished draft re-arms its conditions without
+      // resetting genuine published-post attempts.
+      if (state.pendingPost && state.lastPostAnchor === state.pendingPost.sourceId) {
+        state.lastPostAnchor = "";
+        const createdAt = Number(state.pendingPost.createdAt);
+        if (Number.isFinite(createdAt))
+          state.postAttempts = state.postAttempts.filter(t => t !== createdAt);
+      }
       state.pendingPost = null;
       saveState(state);
       return { ok: true };
