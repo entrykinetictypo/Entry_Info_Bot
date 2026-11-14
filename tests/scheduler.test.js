@@ -11,10 +11,13 @@ const sources = ["core.js", "auth.js", "content.js"].map(name =>
 
 function harness(overrides = {}) {
   let clock = Date.parse("2026-11-15T12:00:00Z");
-  const earlier = new Date(clock - 5 * 60 * 60 * 1000).toISOString();
+  const recent = new Date(clock - 30 * 60 * 1000).toISOString();
+  const newer = new Date(clock - 10 * 60 * 1000).toISOString();
+  const oldPost = new Date(clock - 5 * 60 * 60 * 1000).toISOString();
   const posts = overrides.posts || [
-    { id: "other1", created: earlier, user: { id: "other" } },
-    { id: "mine", created: earlier, user: { id: "self" } }
+    { id: "other2", created: newer, user: { id: "otherB", nickname: "다른사람B" } },
+    { id: "other1", created: recent, user: { id: "otherA", nickname: "다른사람A" } },
+    { id: "mine", created: oldPost, user: { id: "self", nickname: "나" } }
   ];
   let callback = null;
   const record = { comments: [], posts: [], requests: [] };
@@ -105,18 +108,71 @@ function harness(overrides = {}) {
   };
 }
 
-test("comments can repeat on the same latest own Story after interval", async () => {
+test("comments target OTHER users newest eligible posts, never own posts", async () => {
   const h = harness();
   const first = await h.tick();
   assert.equal(first.ok, true);
+  assert.equal(first.commentTarget.nickname, "다른사람B");
   assert.equal(h.record.comments.length, 1);
+  assert.equal(h.record.comments[0].target, "other2");
   h.advance(16);
   const second = await h.tick();
   assert.equal(second.ok, true);
   assert.equal(h.record.comments.length, 2);
-  assert.equal(h.record.comments[0].target, "mine");
-  assert.equal(h.record.comments[1].target, "mine");
+  assert.equal(h.record.comments[1].target, "other1");
   assert.deepEqual(h.record.comments.map(c=>c.content), ["첫 댓글", "두 번째 댓글"]);
+  assert.equal(h.record.comments.some(c => c.target === "mine"), false);
+});
+
+test("never repeats a comment on the same post even after cooldown", async () => {
+  const h = harness({ posts: [
+    { id:"theirPost", created:"2026-11-15T11:50:00Z",
+      user:{id:"other",nickname:"other"} },
+    { id:"mine", created:"2026-11-15T11:30:00Z", user:{id:"self"} }
+  ] });
+  await h.tick();
+  assert.equal(h.record.comments.length, 1);
+  h.advance(20);
+  const second = await h.tick();
+  assert.equal(second.ok,true);
+  assert.match(second.commentStatus,/대상 없음/);
+  assert.equal(h.record.comments.length, 1);
+});
+
+test("limits to one comment per other author in rolling 24h", async () => {
+  const h = harness({ posts:[
+    { id:"first",created:"2026-11-15T11:55:00Z", user:{id:"otherA"} },
+    { id:"second",created:"2026-11-15T11:54:00Z", user:{id:"otherA"} }
+  ]});
+  await h.tick();
+  h.advance(20);
+  await h.tick();
+  assert.equal(h.record.comments.length,1);
+  assert.equal(h.record.comments[0].target,"first");
+});
+
+test("can reply to another person's story even if user never posted", async () => {
+  const h = harness({ posts: [
+    { id:"onlyOther",created:"2026-11-15T11:55:00Z",
+      user:{id:"otherA",nickname:"타인"} }
+  ] });
+  const result = await h.tick();
+  assert.equal(result.ok,true);
+  assert.equal(h.record.comments.length,1);
+  assert.equal(h.record.comments[0].target,"onlyOther");
+  assert.equal(result.postStatus,"새 글 기능 꺼짐");
+});
+
+test("does not target old or unidentified posts", async () => {
+  const h = harness({ posts: [
+    { id:"old",created:"2026-11-15T07:00:00Z",user:{id:"otherA"} },
+    { id:"unknown",created:"2026-11-15T11:59:00Z" },
+    { id:"mine",created:"2026-11-15T11:58:00Z",user:{id:"self"} }
+  ] });
+  const result = await h.tick();
+  assert.equal(result.ok,true);
+  assert.equal(h.record.comments.length,0);
+  assert.match(result.commentStatus,/대상 없음/);
 });
 
 test("explains why no comment is written when messages are empty", async () => {
