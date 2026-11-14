@@ -1,4 +1,4 @@
-name: Console bot checks
+name: Entry Info Bot checks
 
 on:
   push:
@@ -13,6 +13,12 @@ jobs:
         with:
           node-version: 22
       - name: Check JavaScript syntax
-        run: node --check console.js
+        run: |
+          node --check console.js
+          node --check core.js
+          node --check auth.js
+          node --check content.js
+          node --check background.js
+          node --check popup.js
       - name: Verify simulated Entry Story interactions
         run: node --test tests/*.test.js
