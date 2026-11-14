@@ -13,6 +13,7 @@
     commentIntervalMinutes: 60,
     commentsPerDay: 4,
     postEnabled: false,
+    postAutoPublish: false,
     postMessages: "",
     postMode: "sequential",
     postTrigger: "both",
@@ -45,6 +46,7 @@
       commentIntervalMinutes: boundedNumber(input.commentIntervalMinutes, 60, 15, 1440),
       commentsPerDay: boundedNumber(input.commentsPerDay, 4, 1, 6),
       postEnabled: input.postEnabled === true,
+      postAutoPublish: input.postAutoPublish === true,
       postMessages: String(input.postMessages || "").slice(0, 26000),
       postMode: mode("postMode"),
       postTrigger: ["count", "time", "both"].includes(input.postTrigger)
