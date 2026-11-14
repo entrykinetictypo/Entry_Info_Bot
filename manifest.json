@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Entry Info Bot - 이야기 예약",
+  "version": "2.0.0",
+  "description": "내 엔트리이야기 글의 댓글 간격 설정과 새 글 초안 조건을 관리합니다.",
+  "permissions": [
+    "alarms",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://playentry.org/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://playentry.org/community/entrystory/list*"
+      ],
+      "js": [
+        "core.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Entry Info Bot 설정",
+    "default_popup": "popup.html"
+  }
+}
