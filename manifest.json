@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Entry Info Bot - 이야기 예약",
-  "version": "2.1.0",
-  "description": "내 엔트리이야기 글 예약 댓글, 조건 진단, 선택적 새 글 자동 게시",
+  "version": "2.2.0",
+  "description": "다른 사용자의 최근 엔트리이야기 글에 제한적 댓글 작성, 본인 글 새 글 예약",
   "permissions": [
     "alarms",
     "storage",
