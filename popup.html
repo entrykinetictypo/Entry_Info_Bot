@@ -2,7 +2,7 @@
 <html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Entry Info Bot</title><link rel="stylesheet" href="popup.css"></head>
 <body><main>
 <header><h1>Entry Info Bot</h1><p>엔트리이야기 · 내 글 관리</p></header>
-<section><h2>댓글 설정</h2><label class="check"><input id="commentEnabled" type="checkbox">내 최신 글에 예약 댓글 사용</label>
+<section><h2>댓글 설정</h2><p class="note">내 글은 제외하고 최근 2시간 이내 다른 사용자의 글에 댓글을 답니다. 글당 1회, 작성자당 24시간 1회입니다.</p><label class="check"><input id="commentEnabled" type="checkbox">다른 사람의 최근 엔트리이야기 글에 댓글 사용</label>
 <label>댓글 문구 (한 줄에 하나씩)<textarea id="commentMessages" rows="5" placeholder="첫 번째 댓글&#10;두 번째 댓글"></textarea></label>
 <label>문구 선택 방식<select id="commentMode"><option value="sequential">순서대로</option><option value="random">랜덤 (연속 같은 문구 방지)</option></select></label>
 <div class="two"><label>댓글 간격 (분)<input id="commentIntervalMinutes" type="number" min="15" max="1440"></label><label>24시간 최대 댓글<input id="commentsPerDay" type="number" min="1" max="6"></label></div></section>
