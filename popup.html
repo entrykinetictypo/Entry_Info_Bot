@@ -6,14 +6,15 @@
 <label>댓글 문구 (한 줄에 하나씩)<textarea id="commentMessages" rows="5" placeholder="첫 번째 댓글&#10;두 번째 댓글"></textarea></label>
 <label>문구 선택 방식<select id="commentMode"><option value="sequential">순서대로</option><option value="random">랜덤 (연속 같은 문구 방지)</option></select></label>
 <div class="two"><label>댓글 간격 (분)<input id="commentIntervalMinutes" type="number" min="15" max="1440"></label><label>24시간 최대 댓글<input id="commentsPerDay" type="number" min="1" max="6"></label></div></section>
-<section><h2>새 글 조건</h2><label class="check"><input id="postEnabled" type="checkbox">새 글 초안 자동 준비</label>
+<section><h2>새 글 조건</h2><label class="check"><input id="postEnabled" type="checkbox">새 글 기능 사용</label>
+<label class="check"><input id="postAutoPublish" type="checkbox">조건 충족 시 새 글 자동 게시 (별도로 켜기)</label>
 <label>새 글 문구 (한 줄에 하나씩)<textarea id="postMessages" rows="5" placeholder="첫 번째 글&#10;두 번째 글"></textarea></label>
 <label>문구 선택 방식<select id="postMode"><option value="sequential">순서대로</option><option value="random">랜덤</option></select></label>
-<label>새 글 초안 준비 기준<select id="postTrigger"><option value="count">내 글 위에 쌓인 새 글 수</option><option value="time">내 글 작성 후 경과 시간</option><option value="both">두 기준 모두 충족</option></select></label>
+<label>새 글 작성 조건<select id="postTrigger"><option value="count">내 글 위에 쌓인 새 글 수</option><option value="time">내 글 작성 후 경과 시간</option><option value="both">두 기준 모두 충족</option></select></label>
 <div class="two"><label>글 수 기준<input id="countThreshold" type="number" min="20" max="100"></label><label>시간 기준 (분)<input id="timeThresholdMinutes" type="number" min="120" max="10080"></label></div>
-<label>24시간 새 글 초안 한도<input id="postsPerDay" type="number" min="1" max="2"></label>
-<p class="note">새 글은 자동 게시하지 않고 초안을 준비합니다. 게시 전 사용자가 확인해야 합니다.</p></section>
-<section><div class="actions"><button id="save">설정 저장</button><button id="preview" class="secondary">미리보기</button></div><div class="actions"><button id="start">자동 확인 시작</button><button id="stop" class="danger">중지</button></div><p id="status" role="status" aria-live="polite"></p></section>
+<label>24시간 최대 새 글 수<input id="postsPerDay" type="number" min="1" max="2"></label>
+<p class="note">자동 게시를 체크하지 않으면 초안만 준비합니다. 자동 게시를 켜면 조건에 도달했을 때 실제 공개 글이 게시됩니다. 테스트 시 미리보기를 먼저 사용하세요.</p></section>
+<section><div class="actions"><button id="save">설정 저장</button><button id="preview" class="secondary">조건 진단 / 미리보기</button></div><div class="actions"><button id="start">자동 확인 시작</button><button id="stop" class="danger">중지</button></div><p id="status" role="status" aria-live="polite"></p></section>
 <section><h2>새 글 초안</h2><textarea id="draft" rows="5" readonly placeholder="준비된 초안이 여기에 나타납니다."></textarea><div class="actions"><button id="loadDraft" class="secondary">초안 불러오기</button><button id="copyDraft">초안 복사</button><button id="clearDraft" class="secondary">초안 비우기</button></div></section>
 <footer>비공식 확장프로그램 · 엔트리 이야기 탭을 열어둬야 작동합니다.</footer>
 </main><script src="core.js"></script><script src="popup.js"></script></body></html>
