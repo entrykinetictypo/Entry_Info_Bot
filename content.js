@@ -169,6 +169,7 @@ async function tick(dryRun) {
         // A draft requires a human to publish it. Do not guess an undocumented write API.
         state.pendingPost = { content: choice.content, sourceId: anchor.id,
           countAbove, ageMinutes: report.ageMinutes, createdAt: now };
+        state.postAttempts.push(now);
         state.preparedAt = now;
         state.lastPostAnchor = anchor.id;
         state.lastPostIndex = choice.index;
