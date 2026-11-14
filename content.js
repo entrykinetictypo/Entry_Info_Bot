@@ -149,7 +149,7 @@ async function tick(dryRun) {
         saveState(state);
         const response = await graphql("CREATE_COMMENT", Q.comment, {
           content: choice.content, target: anchor.id,
-          targetSubject: "discuss", targetType: "comment"
+          targetSubject: "discuss", targetType: "individual"
         }, true, auth);
         if (!response.createComment?.comment?.id || response.createComment.warning)
           throw new Error("댓글 발행을 확인할 수 없어 재시도하지 않습니다.");
