@@ -31,14 +31,13 @@ async function send(type) {
   say(result?.message || "응답 없음");
   return result;
 }
-async function storyTab() {
-  const tabs = await chrome.tabs.query({ url: "https://playentry.org/community/entrystory/list*" });
-  if (!tabs.length) throw new Error("엔트리 이야기 목록 탭을 열어주세요.");
-  return tabs.find(tab=>tab.active) || tabs[0];
-}
 async function draftAction(type) {
-  const tab = await storyTab();
-  const response = await chrome.tabs.sendMessage(tab.id, { type });
+  // Route through the background worker so it can recover a missing
+  // content script after extension installation or reload.
+  const response = await chrome.runtime.sendMessage({
+    type: "ENTRY_BOT_PAGE",
+    action: type
+  });
   if (!response?.ok) throw new Error(response?.message || "초안 요청 실패");
   return response;
 }
