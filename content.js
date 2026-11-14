@@ -1,7 +1,7 @@
-/* Entry Info Bot v2.1 - Entry Story scheduler and readable diagnostics. */
+/* Entry Info Bot v2.2 - comment on recent stories by OTHER users. */
 (() => {
 "use strict";
-if (globalThis.__entryInfoBotStoryListenerV3) return;
+if (globalThis.__entryInfoBotStoryListenerV4) return;
 const core = globalThis.EntryBotCore;
 const authParser = globalThis.EntryBotAuth;
 if (!core || !authParser) {
@@ -31,6 +31,10 @@ function loadState(userId) {
     lastCommentIndex: Number.isInteger(stored.lastCommentIndex) ? stored.lastCommentIndex : -1,
     lastPostIndex: Number.isInteger(stored.lastPostIndex) ? stored.lastPostIndex : -1,
     commentAttempts: Array.isArray(stored.commentAttempts) ? stored.commentAttempts : [],
+    commentedPostIds: Array.isArray(stored.commentedPostIds)
+      ? stored.commentedPostIds.filter(x => typeof x === "string").slice(-500) : [],
+    commentAuthorAttempts: Array.isArray(stored.commentAuthorAttempts)
+      ? stored.commentAuthorAttempts : [],
     postAttempts: Array.isArray(stored.postAttempts) ? stored.postAttempts : [],
     lastCommentAt: Number(stored.lastCommentAt) || 0,
     lastCommentAnchor: String(stored.lastCommentAnchor || ""),
@@ -108,10 +112,10 @@ async function graphql(name, query, variables, write, auth) {
   return payload.data;
 }
 
-async function scanStories(auth) {
+async function scanStories(auth, maxPosts = MAX_POSTS) {
   const posts = [];
   const seen = new Set();
-  for (let start = 0; start < MAX_POSTS; start += 20) {
+  for (let start = 0; start < maxPosts; start += 20) {
     const result = await graphql("SELECT_ENTRYSTORY", Q.stories, {
       category: "free", term: "all", discussType: "entrystory",
       searchType: "scroll", pageParam: { display: 20, start, sort: "created" }
@@ -190,25 +194,31 @@ async function tick(dryRun) {
     const auth = await account();
     const state = loadState(auth.id);
     state.commentAttempts = core.withinRollingDay(state.commentAttempts, now);
+    state.commentAuthorAttempts = state.commentAuthorAttempts.filter(item =>
+      item && typeof item.id === "string" && Number.isFinite(item.at) &&
+      item.at <= now && item.at > now - 86400000).slice(-100);
     state.postAttempts = core.withinRollingDay(state.postAttempts, now);
 
-    const posts = await scanStories(auth);
+    // Comment scheduling is independent from our own post. Only new posts
+    // by other accounts are candidates, and only one comment is sent per tick.
+    const posts = await scanStories(auth, settings.postEnabled ? MAX_POSTS : 20);
     report.scannedPosts = posts.length;
-    const anchor = await findAnchor(auth, posts);
-    if (!anchor) {
-      report.commentStatus = "내 최신 글을 찾지 못함 (최근 100개 또는 계정별 검색)";
-      report.postStatus = report.commentStatus;
-      report.message = "댓글: " + report.commentStatus + " / 새 글: " + report.postStatus;
-      return report;
+    const anchor = settings.postEnabled ? await findAnchor(auth, posts) : null;
+    if (anchor) {
+      report.anchorId = anchor.id;
+      report.countAbove = anchor.countAbove;
+      report.countIsLowerBound = anchor.countIsLowerBound;
     }
-    report.anchorId = anchor.id;
-    report.countAbove = anchor.countAbove;
-    report.countIsLowerBound = anchor.countIsLowerBound;
-    const age = ageMinutes(anchor,now);
+    const age = anchor ? ageMinutes(anchor, now) : NaN;
     report.ageMinutes = Number.isFinite(age) ? Math.floor(age) : null;
     report.commentAttempts24h = state.commentAttempts.length;
     report.postAttempts24h = state.postAttempts.length;
 
+    const target = core.selectCommentTarget(posts, auth.id,
+      state.commentedPostIds, state.commentAuthorAttempts, now, 120);
+    report.commentTarget = target ? {
+      id: target.id, nickname: target.authorNickname
+    } : null;
     const comments = core.parseMessages(settings.commentMessages);
     const nextCommentAt = state.lastCommentAt + settings.commentIntervalMinutes * 60000;
     if (!settings.commentEnabled) {
@@ -220,29 +230,37 @@ async function tick(dryRun) {
         state.commentAttempts.length + "/" + settings.commentsPerDay + ")";
     } else if (state.lastCommentAt && now < nextCommentAt) {
       report.commentStatus = "다음 댓글까지 " + minutesLeft(nextCommentAt - now) + "분 남음";
+    } else if (!target) {
+      report.commentStatus = "다른 사람의 최근 글 중 새 댓글 대상 없음 " +
+        "(최근 2시간 글·글당 1회·작성자당 24시간 1회)";
     } else {
       const choice = core.chooseMessage(comments, settings.commentMode,
         state.commentCursor, state.lastCommentIndex);
       report.commentPreview = choice.content;
       if (dryRun) {
-        report.commentStatus = "댓글 작성 가능 (미리보기이므로 게시하지 않음)";
+        report.commentStatus = "다른 사람(" + target.authorNickname +
+          ")의 글에 댓글 작성 가능 (미리보기)";
       } else if (!await stillRunning(false)) {
         report.commentStatus = "실행 중지됨";
       } else {
-        // Mark attempts before the request; uncertain writes are never retried.
+        // Mark attempt BEFORE write. A failed or uncertain response must
+        // never trigger duplicate comments to someone else's post.
         state.lastCommentAt = now;
-        state.lastCommentAnchor = anchor.id;
+        state.lastCommentAnchor = target.id;
         state.commentAttempts.push(now);
+        state.commentedPostIds.push(target.id);
+        state.commentedPostIds = state.commentedPostIds.slice(-500);
+        state.commentAuthorAttempts.push({ id: target.authorId, at: now });
         state.commentCursor = choice.nextCursor;
         state.lastCommentIndex = choice.index;
         saveState(state);
-        const result = await graphql("CREATE_COMMENT",Q.comment,{
-          content: choice.content, target: anchor.id,
+        const result = await graphql("CREATE_COMMENT", Q.comment, {
+          content: choice.content, target: target.id,
           targetSubject: "discuss", targetType: "individual"
-        },true,auth);
+        }, true, auth);
         if (!result.createComment?.comment?.id || result.createComment.warning)
-          throw new Error("댓글 발행을 확인하지 못했습니다. 중복 방지를 위해 자동 재시도하지 않습니다.");
-        report.commentStatus = "댓글 게시 성공";
+          throw new Error("댓글 발행 여부가 불확실해 중복 방지를 위해 재시도하지 않습니다.");
+        report.commentStatus = target.authorNickname + "님의 글에 댓글 게시 성공";
       }
     }
 
@@ -254,6 +272,8 @@ async function tick(dryRun) {
     report.postCondition = { countReady, timeReady, required: settings.postTrigger };
     if (!settings.postEnabled) {
       report.postStatus = "새 글 기능 꺼짐";
+    } else if (!anchor) {
+      report.postStatus = "내 글을 찾지 못해 새 글 작성 조건을 확인할 수 없음";
     } else if (!newMessages.length) {
       report.postStatus = "새 글 문구가 비어 있음";
     } else if (state.postAttempts.length >= settings.postsPerDay) {
@@ -348,5 +368,5 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   }
   return false;
 });
-globalThis.__entryInfoBotStoryListenerV3 = true;
+globalThis.__entryInfoBotStoryListenerV4 = true;
 })();
