@@ -99,9 +99,45 @@
     return { id: posts[index].id, created: posts[index].created, countAbove: index };
   }
 
+  // Select the newest eligible story written by someone OTHER than our account.
+  // No targeting of old stories, duplicate comments or repeated authors in 24h.
+  function selectCommentTarget(posts, accountId, attemptedIds, authorAttempts, now,
+      maxAgeMinutes = 120) {
+    if (!Array.isArray(posts) || !accountId || !Number.isFinite(now)) return null;
+    const handled = new Set(Array.isArray(attemptedIds) ? attemptedIds : []);
+    const recentAuthors = new Set(
+      (Array.isArray(authorAttempts) ? authorAttempts : [])
+        .filter(record => record && typeof record.id === "string" &&
+          Number.isFinite(record.at) && record.at <= now &&
+          record.at > now - 86400000)
+        .map(record => record.id)
+    );
+    for (const post of posts) {
+      const id = post?.id;
+      const authorId = post?.user?.id;
+      if (typeof id !== "string" || !id ||
+          typeof authorId !== "string" || !authorId ||
+          authorId === accountId || handled.has(id) || recentAuthors.has(authorId))
+        continue;
+      const raw = post.created;
+      const createdMs = typeof raw === "number"
+        ? (raw < 1e12 ? raw * 1000 : raw) : Date.parse(String(raw || ""));
+      const elapsed = now - createdMs;
+      if (!Number.isFinite(createdMs) || elapsed < -60000 ||
+          elapsed > maxAgeMinutes * 60000) continue;
+      return {
+        id,
+        authorId,
+        authorNickname: typeof post.user.nickname === "string"
+          ? post.user.nickname.slice(0,60) : "(이름 없음)"
+      };
+    }
+    return null;
+  }
+
   const api = {
     DEFAULTS, parseMessages, normalizeSettings, chooseMessage,
-    shouldPost, withinRollingDay, storyAnchor
+    shouldPost, withinRollingDay, storyAnchor, selectCommentTarget
   };
   root.EntryBotCore = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
