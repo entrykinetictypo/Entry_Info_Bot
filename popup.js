@@ -16,6 +16,8 @@ function formatStatus(running, runtime) {
   }
   if (runtime?.ageMinutes !== null && Number.isFinite(runtime?.ageMinutes))
     lines.push("내 글 작성 후: " + runtime.ageMinutes + "분");
+  if (runtime?.commentTarget?.nickname && runtime?.dryRun)
+    lines.push("댓글 대상: " + runtime.commentTarget.nickname + "님의 글");
   if (runtime?.commentStatus) lines.push("댓글: " + runtime.commentStatus);
   if (runtime?.postStatus) lines.push("새 글: " + runtime.postStatus);
   if (runtime?.commentPreview && runtime.dryRun)
