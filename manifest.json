@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Entry Info Bot - 이야기 예약",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "내 엔트리이야기 글의 댓글 간격 설정과 새 글 초안 조건을 관리합니다.",
   "permissions": [
     "alarms",
@@ -22,6 +22,7 @@
       ],
       "js": [
         "core.js",
+        "auth.js",
         "content.js"
       ],
       "run_at": "document_idle"
