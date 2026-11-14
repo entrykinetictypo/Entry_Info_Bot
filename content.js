@@ -1,5 +1,7 @@
 /* Entry Info Bot: isolated content script for the Entry Story list only. */
+(() => {
 "use strict";
+if (globalThis.__entryInfoBotStoryListenerV2) return;
 
 const core = globalThis.EntryBotCore;
 const LIST_URL = "/community/entrystory/list";
@@ -242,3 +244,6 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   }
   return false;
 });
+
+globalThis.__entryInfoBotStoryListenerV2 = true;
+})();
