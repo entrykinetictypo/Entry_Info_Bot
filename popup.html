@@ -11,7 +11,7 @@
 <label>새 글 문구 (Enter로 문구 구분, 긴 글은 가로 스크롤)<textarea id="postMessages" rows="5" wrap="off" spellcheck="false" placeholder="첫 번째 글&#10;두 번째 글"></textarea></label>
 <label>문구 선택 방식<select id="postMode"><option value="sequential">순서대로</option><option value="random">랜덤</option></select></label>
 <label>새 글 작성 조건<select id="postTrigger"><option value="count">내 글 위에 쌓인 새 글 수</option><option value="time">내 글 작성 후 경과 시간</option><option value="both">두 기준 모두 충족</option></select></label>
-<div class="two"><label>글 수 기준<input id="countThreshold" type="number" min="20" max="100"></label><label>시간 기준 (분)<input id="timeThresholdMinutes" type="number" min="120" max="10080"></label></div>
+<div class="two"><label>글 수 기준<input id="countThreshold" type="number" min="1" max="100"></label><label>시간 기준 (분)<input id="timeThresholdMinutes" type="number" min="1" max="10080"></label></div>
 <label>24시간 최대 새 글 수<input id="postsPerDay" type="number" min="1" max="2"></label>
 <p class="note">자동 게시를 체크하지 않으면 초안만 준비합니다. 자동 게시를 켜면 조건에 도달했을 때 실제 공개 글이 게시됩니다. 테스트 시 미리보기를 먼저 사용하세요.</p></section>
 <section><div class="actions"><button id="save">설정 저장</button><button id="preview" class="secondary">조건 진단 / 미리보기</button></div><div class="actions"><button id="start">자동 확인 시작</button><button id="stop" class="danger">중지</button></div><p id="status" role="status" aria-live="polite"></p></section>
