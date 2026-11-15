@@ -51,8 +51,8 @@
       postMode: mode("postMode"),
       postTrigger: ["count", "time", "both"].includes(input.postTrigger)
         ? input.postTrigger : "both",
-      countThreshold: boundedNumber(input.countThreshold, 40, 20, 100),
-      timeThresholdMinutes: boundedNumber(input.timeThresholdMinutes, 360, 120, 10080),
+      countThreshold: boundedNumber(input.countThreshold, 40, 1, 100),
+      timeThresholdMinutes: boundedNumber(input.timeThresholdMinutes, 360, 1, 10080),
       postsPerDay: boundedNumber(input.postsPerDay, 1, 1, 2)
     };
   }
