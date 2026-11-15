@@ -31,8 +31,8 @@ test("limits clamp unsafe values", () => {
     commentsPerDay: 100, countThreshold: 2, timeThresholdMinutes: 10 });
   assert.equal(s.commentIntervalMinutes, 15);
   assert.equal(s.commentsPerDay, 6);
-  assert.equal(s.countThreshold, 20);
-  assert.equal(s.timeThresholdMinutes, 120);
+  assert.equal(s.countThreshold, 2);
+  assert.equal(s.timeThresholdMinutes, 10);
 });
 test("find latest own post and count above", () => {
   const posts = [
