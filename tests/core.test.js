@@ -47,3 +47,21 @@ test("rolling 24 hours records only recent past events", () => {
   const now = 10 * 86400000;
   assert.deepEqual(core.withinRollingDay([now-86400000, now-1000, now+1000],now),[now-1000]);
 });
+
+test("new story triggers accept both thresholds set to 1", () => {
+  const config = core.normalizeSettings({
+    postEnabled: true, countThreshold: 1, timeThresholdMinutes: 1,
+    postTrigger: "both"
+  });
+  assert.equal(config.countThreshold, 1);
+  assert.equal(config.timeThresholdMinutes, 1);
+  assert.equal(core.shouldPost(config, 1, 0.99), false);
+  assert.equal(core.shouldPost(config, 0, 1), false);
+  assert.equal(core.shouldPost(config, 1, 1), true);
+  assert.equal(core.normalizeSettings({
+    countThreshold: 0, timeThresholdMinutes: 0
+  }).countThreshold, 1);
+  assert.equal(core.normalizeSettings({
+    countThreshold: 0, timeThresholdMinutes: 0
+  }).timeThresholdMinutes, 1);
+});
